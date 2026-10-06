@@ -12,7 +12,7 @@ import secrets
 import threading
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
@@ -30,9 +30,9 @@ PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 security = HTTPBasic(auto_error=False)
 
 
-def auth(creds: HTTPBasicCredentials | None = Depends(security)) -> None:
-    if not PASSWORD:
-        return  # auth disabled (local development)
+def auth(request: Request, creds: HTTPBasicCredentials | None = Depends(security)) -> None:
+    if not PASSWORD or request.url.path == "/healthz":
+        return  # auth disabled (local development) or container healthcheck
     if creds and secrets.compare_digest(creds.username.encode(), USER.encode()) \
             and secrets.compare_digest(creds.password.encode(), PASSWORD.encode()):
         return
@@ -48,7 +48,7 @@ def startup() -> None:
     threading.Thread(target=checker.scheduler_loop, daemon=True).start()
 
 
-@app.get("/healthz", dependencies=[])
+@app.get("/healthz")
 def healthz():
     return {"ok": True}
 
