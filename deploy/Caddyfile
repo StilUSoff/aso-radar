@@ -1,4 +1,4 @@
-{$DOMAIN} {
+{$DOMAIN}:{$HTTPS_PORT:443} {
 	encode gzip
 	reverse_proxy app:8000
 }

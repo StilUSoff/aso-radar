@@ -77,6 +77,7 @@ sudo ./deploy/install.sh      # Docker, .env со случайным парол�
 Доступ к дашборду:
 
 - **С доменом (рекомендуется):** направьте A‑запись домена на сервер, укажите `DOMAIN=aso.example.com` в `.env`, откройте порты 80/443 и выполните `./deploy/update.sh` — поднимется Caddy с HTTPS.
+- **Если 443 занят** (например, VPN): задайте `HTTPS_PORT=8443` — дашборд будет на `https://домен:8443`, порт 80 по‑прежнему нужен для выпуска сертификата.
 - **Без домена:** сервис слушает только `127.0.0.1:8000`. Откройте его через SSH‑туннель: `ssh -L 8000:localhost:8000 user@server`, затем http://localhost:8000.
 
 Обновление после `git push`: `cd ~/aso-radar && ./deploy/update.sh`.
@@ -92,4 +93,5 @@ sudo ./deploy/install.sh      # Docker, .env со случайным парол�
 | `ITUNES_REQUEST_DELAY` | `3.2` | Пауза между запросами к Apple, сек |
 | `ASC_KEY_ID`, `ASC_ISSUER_ID` | — | Ключ App Store Connect API |
 | `DOMAIN` | — | Домен для HTTPS через Caddy |
+| `HTTPS_PORT` | `443` | Внешний HTTPS‑порт Caddy |
 | `APP_PORT` | `8000` | Локальный порт сервиса |

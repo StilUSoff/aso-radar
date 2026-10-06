@@ -20,8 +20,8 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "80:80"
-      - "443:443"
+      - "80:80"   # ACME HTTP challenge + redirect
+      - "${HTTPS_PORT:-443}:${HTTPS_PORT:-443}"
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
