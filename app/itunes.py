@@ -1,67 +1,93 @@
-"""Public iTunes Search / Lookup API client with rate limiting.
+"""App Store clients: search suggestions (hints) and app search.
 
-Apple allows roughly 20 requests per minute per IP, so every call goes
-through a shared throttle.
+Every endpoint has its own throttle. Search is limited by Apple to ~20
+requests/minute per IP; hints tolerate much more, but we stay polite.
 """
 
 from __future__ import annotations
 
+import html
 import os
+import re
 import threading
 import time
 
 import httpx
 
+HINTS_URL = "https://search.itunes.apple.com/WebObjects/MZSearchHints.woa/wa/hints"
 SEARCH_URL = "https://itunes.apple.com/search"
-LOOKUP_URL = "https://itunes.apple.com/lookup"
-SEARCH_LIMIT = 200
-REQUEST_DELAY = float(os.environ.get("ITUNES_REQUEST_DELAY", "3.2"))
+HINTS_PER_PAGE = 10
 
-_lock = threading.Lock()
-_last_call = 0.0
-_client = httpx.Client(timeout=30, headers={"User-Agent": "aso-radar/1.0"})
+_client = httpx.Client(timeout=30, headers={"User-Agent": "AppStore/3.0 iOS/17.0 model/iPhone15,2"})
+_HINT_TERM = re.compile(r"<key>term</key>\s*<string>(.*?)</string>", re.S)
 
 
 class ItunesError(Exception):
     pass
 
 
-def _get(url: str, params: dict) -> dict:
-    global _last_call
+class _Throttle:
+    def __init__(self, delay: float):
+        self.delay = delay
+        self.lock = threading.Lock()
+        self.last = 0.0
+
+    def wait(self) -> None:
+        with self.lock:
+            pause = self.last + self.delay - time.monotonic()
+            if pause > 0:
+                time.sleep(pause)
+            self.last = time.monotonic()
+
+
+_hints_throttle = _Throttle(float(os.environ.get("HINTS_REQUEST_DELAY", "0.35")))
+_search_throttle = _Throttle(float(os.environ.get("SEARCH_REQUEST_DELAY", "3.2")))
+
+
+def _get(url: str, throttle: _Throttle, **kwargs) -> httpx.Response:
+    err = "?"
     for attempt in range(5):
-        with _lock:
-            wait = _last_call + REQUEST_DELAY - time.monotonic()
-            if wait > 0:
-                time.sleep(wait)
-            _last_call = time.monotonic()
+        throttle.wait()
         try:
-            resp = _client.get(url, params=params)
+            resp = _client.get(url, **kwargs)
         except httpx.HTTPError as e:
             err = str(e)
         else:
             if resp.status_code == 200:
-                return resp.json()
+                return resp
             err = f"HTTP {resp.status_code}"
             if resp.status_code not in (403, 429, 500, 502, 503, 504):
                 break
         # Throttled or transient failure: back off before retrying.
-        time.sleep(min(60, 10 * 2**attempt))
+        time.sleep(min(120, 10 * 2**attempt))
     raise ItunesError(f"{url} failed: {err}")
 
 
-def search(term: str, country: str) -> list[dict]:
-    data = _get(
-        SEARCH_URL,
-        {"term": term, "country": country, "entity": "software", "limit": SEARCH_LIMIT},
+def hints(prefix: str, storefront: int) -> list[str]:
+    """Search suggestions for a typed prefix, most popular first."""
+    resp = _get(
+        HINTS_URL, _hints_throttle,
+        params={"clientApplication": "Software", "term": prefix},
+        headers={"X-Apple-Store-Front": f"{storefront}-1,29"},
     )
+    seen, out = set(), []
+    for raw in _HINT_TERM.findall(resp.text):
+        term = " ".join(html.unescape(raw).split()).lower()
+        if term and term not in seen:
+            seen.add(term)
+            out.append(term)
+    return out
+
+
+def search(term: str, country: str, limit: int = 5) -> list[dict]:
+    """Top apps App Store shows for a query."""
+    data = _get(
+        SEARCH_URL, _search_throttle,
+        params={"term": term, "country": country, "entity": "software", "limit": limit},
+    ).json()
     return [
-        {"id": r["trackId"], "name": r.get("trackName", ""), "icon": r.get("artworkUrl60", "")}
+        {"id": r["trackId"], "name": r.get("trackName", ""), "icon": r.get("artworkUrl60", ""),
+         "seller": r.get("sellerName", ""), "url": r.get("trackViewUrl", "")}
         for r in data.get("results", [])
         if "trackId" in r
     ]
-
-
-def lookup(app_id: int, country: str = "us") -> dict | None:
-    data = _get(LOOKUP_URL, {"id": app_id, "country": country})
-    results = data.get("results") or []
-    return results[0] if results else None

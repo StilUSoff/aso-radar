@@ -1,7 +1,5 @@
 .env
 data/
-secrets/
-*.p8
 __pycache__/
 *.pyc
 .venv/

@@ -1,31 +1,32 @@
-"""ASO Radar: keyword rankings by App Store storefront."""
+"""ASO Radar: top App Store search queries per market, mined from search suggestions."""
 
 from __future__ import annotations
 
 import csv
 import io
-import json
 import logging
 import os
-import re
 import secrets
 import threading
+import time
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from . import asc, checker, db, itunes
-from .locales import COUNTRIES, LOCALE_STOREFRONTS, storefronts_for
+from . import db, itunes, scanner
+from .markets import MARKETS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 STATIC = Path(__file__).parent / "static"
 USER = os.environ.get("DASHBOARD_USER", "admin")
 PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
+TREND_POINTS = 12
+TILE_TOP = 100  # "new" / "rising" are counted within this many top terms
 
 security = HTTPBasic(auto_error=False)
 
@@ -45,7 +46,7 @@ app = FastAPI(title="ASO Radar", dependencies=[Depends(auth)], docs_url=None, re
 @app.on_event("startup")
 def startup() -> None:
     db.init()
-    threading.Thread(target=checker.scheduler_loop, daemon=True).start()
+    threading.Thread(target=scanner.scheduler_loop, daemon=True).start()
 
 
 @app.get("/healthz")
@@ -61,242 +62,199 @@ def index():
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
+def market_or_404(locale: str) -> dict:
+    m = MARKETS.get(locale)
+    if not m:
+        raise HTTPException(404, "Unknown market")
+    return m
+
+
+def public(m: dict) -> dict:
+    return {k: v for k, v in m.items() if k != "scan_key"}
+
+
+def recent_scans(conn, scan_key: str, n: int) -> list[dict]:
+    """Latest market scans of a scan unit, newest first."""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM market_scans WHERE scan_key = ? ORDER BY id DESC LIMIT ?", (scan_key, n)
+    ).fetchall()]
+
+
+def ranks_of(conn, market_scan_id: int, limit: int) -> dict[str, int]:
+    return {r["term"]: r["rank"] for r in conn.execute(
+        "SELECT term, rank FROM keywords WHERE market_scan_id = ? AND rank <= ?", (market_scan_id, limit)
+    ).fetchall()}
+
+
 # ---------- meta ----------
 
 @app.get("/api/meta")
 def meta():
     return {
-        "countries": COUNTRIES,
-        "locales": LOCALE_STOREFRONTS,
-        "asc_configured": asc.configured(),
-        "check_interval_hours": checker.CHECK_INTERVAL_HOURS,
+        "markets": [public(m) for m in MARKETS.values()],
+        "scan_interval_hours": scanner.SCAN_INTERVAL_HOURS,
+        "top_n": scanner.TOP_N,
     }
 
 
-# ---------- apps ----------
+# ---------- markets ----------
 
-class AppIn(BaseModel):
-    app: str = Field(..., description="App Store ID or App Store URL")
-    country: str = "us"
-
-
-def get_app(conn, app_id: int):
-    row = conn.execute("SELECT * FROM apps WHERE id = ?", (app_id,)).fetchone()
-    if not row:
-        raise HTTPException(404, "App not found")
-    return row
-
-
-@app.get("/api/apps")
-def list_apps():
+@app.get("/api/markets")
+def markets_overview():
+    """Tile data for every market: freshness, leaders and movement in the top."""
+    out, cache = [], {}
     with db.tx() as conn:
+        for m in MARKETS.values():
+            key = m["scan_key"]
+            if key not in cache:
+                scans = recent_scans(conn, key, 2)
+                info = {"scanned_at": None, "unique_terms": 0, "prefixes": 0, "leaders": [],
+                        "new": 0, "rising": 0, "falling": 0, "has_previous": len(scans) > 1}
+                if scans:
+                    cur = scans[0]
+                    info.update(scanned_at=cur["scanned_at"], unique_terms=cur["unique_terms"],
+                                prefixes=cur["prefixes"])
+                    now_ranks = ranks_of(conn, cur["id"], TILE_TOP)
+                    info["leaders"] = [t for t, _ in sorted(now_ranks.items(), key=lambda kv: kv[1])[:3]]
+                    if len(scans) > 1:
+                        prev = ranks_of(conn, scans[1]["id"], TILE_TOP)
+                        for term, r in now_ranks.items():
+                            if term not in prev:
+                                info["new"] += 1
+                            elif prev[term] - r >= 5:
+                                info["rising"] += 1
+                            elif r - prev[term] >= 5:
+                                info["falling"] += 1
+                cache[key] = info
+            out.append({"locale": m["locale"], "name": m["name"], "country": m["country"],
+                        "shares_with": m["shares_with"], **cache[key]})
+    return out
+
+
+@app.get("/api/markets/{locale}")
+def market_keywords(locale: str, limit: int = Query(100, le=1000), offset: int = 0, q: str = ""):
+    m = market_or_404(locale)
+    with db.tx() as conn:
+        scans = recent_scans(conn, m["scan_key"], TREND_POINTS)
+        if not scans:
+            return {"market": public(m), "scan": None, "has_previous": False,
+                    "trend_dates": [], "total": 0, "items": []}
+        cur = scans[0]
+        where, args = "market_scan_id = ?", [cur["id"]]
+        if q.strip():
+            where += " AND term LIKE ?"
+            args.append(f"%{q.strip().lower()}%")
+        total = conn.execute(f"SELECT COUNT(*) FROM keywords WHERE {where}", args).fetchone()[0]
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT term, rank, score, hits, best_prefix, best_pos FROM keywords WHERE {where}"
+            " ORDER BY rank LIMIT ? OFFSET ?", args + [limit, offset]
+        ).fetchall()]
+
+        # Rank history of the listed terms over the recent scans.
+        history: dict[str, dict[int, int]] = {}
+        if rows:
+            ids = [s["id"] for s in scans]
+            terms = [r["term"] for r in rows]
+            for h in conn.execute(
+                f"SELECT market_scan_id, term, rank FROM keywords"
+                f" WHERE market_scan_id IN ({','.join('?' * len(ids))})"
+                f" AND term IN ({','.join('?' * len(terms))})", ids + terms
+            ).fetchall():
+                history.setdefault(h["term"], {})[h["market_scan_id"]] = h["rank"]
+
+    ordered = list(reversed(scans))  # oldest -> newest
+    prev_id = scans[1]["id"] if len(scans) > 1 else None
+    for r in rows:
+        h = history.get(r["term"], {})
+        r["trend"] = [h.get(s["id"]) for s in ordered]
+        r["prev_rank"] = h.get(prev_id) if prev_id else None
+        r["is_new"] = prev_id is not None and prev_id not in h
+    return {"market": public(m), "scan": cur, "has_previous": prev_id is not None,
+            "trend_dates": [s["scanned_at"] for s in ordered], "total": total, "items": rows}
+
+
+@app.get("/api/search")
+def search_keyword(q: str = Query(..., min_length=2), limit: int = 40):
+    """Where a query (substring) shows up across markets, by latest scans."""
+    q = q.strip().lower()
+    with db.tx() as conn:
+        latest = {r["scan_key"]: r["id"] for r in conn.execute(
+            "SELECT scan_key, MAX(id) AS id FROM market_scans GROUP BY scan_key").fetchall()}
+        if not latest:
+            return []
         rows = conn.execute(
-            "SELECT a.*, (SELECT COUNT(*) FROM keywords k WHERE k.app_id = a.id) AS keyword_count"
-            " FROM apps a ORDER BY a.name"
+            f"SELECT market_scan_id, term, rank, score FROM keywords"
+            f" WHERE market_scan_id IN ({','.join('?' * len(latest))}) AND term LIKE ?",
+            list(latest.values()) + [f"%{q}%"],
         ).fetchall()
-    return [dict(r) for r in rows]
+    key_of_scan = {v: k for k, v in latest.items()}
+    terms: dict[str, list] = {}
+    for r in rows:
+        key = key_of_scan[r["market_scan_id"]]
+        for m in MARKETS.values():
+            if m["scan_key"] == key:
+                terms.setdefault(r["term"], []).append(
+                    {"locale": m["locale"], "name": m["name"], "country": m["country"],
+                     "rank": r["rank"], "score": r["score"]})
+    out = [{"term": t, "markets": sorted(ms, key=lambda x: x["rank"])} for t, ms in terms.items()]
+    out.sort(key=lambda x: (x["term"] != q, -len(x["markets"]), x["markets"][0]["rank"]))
+    return out[:limit]
 
 
-@app.post("/api/apps")
-def add_app(body: AppIn):
-    m = re.search(r"(?:id)?(\d{6,})", body.app)
-    if not m:
-        raise HTTPException(400, "Provide a numeric App Store ID or an apps.apple.com URL")
-    app_id = int(m.group(1))
+_apps_cache: dict[tuple[str, str], tuple[float, list]] = {}
+
+
+@app.get("/api/top-apps")
+def top_apps(term: str, country: str):
+    """Apps App Store ranks first for a query (cached for an hour)."""
+    key = (term.lower(), country.lower())
+    hit = _apps_cache.get(key)
+    if hit and time.time() - hit[0] < 3600:
+        return hit[1]
     try:
-        info = itunes.lookup(app_id, body.country.lower())
+        apps = itunes.search(term, country)
     except itunes.ItunesError as e:
         raise HTTPException(502, str(e))
-    if not info:
-        raise HTTPException(404, f"App {app_id} not found in the '{body.country}' storefront")
-    with db.tx() as conn:
-        conn.execute(
-            "INSERT INTO apps (id, name, bundle_id, icon, seller, created_at) VALUES (?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon",
-            (app_id, info.get("trackName", str(app_id)), info.get("bundleId"),
-             info.get("artworkUrl100"), info.get("sellerName"), db.now()),
-        )
-        return dict(get_app(conn, app_id))
+    _apps_cache[key] = (time.time(), apps)
+    return apps
 
 
-@app.delete("/api/apps/{app_id}")
-def delete_app(app_id: int):
-    with db.tx() as conn:
-        conn.execute("DELETE FROM apps WHERE id = ?", (app_id,))
-    return {"ok": True}
-
-
-# ---------- keywords ----------
-
-class KeywordsIn(BaseModel):
-    countries: list[str]
-    terms: str = Field(..., description="Comma or newline separated")
-
-
-def split_terms(text: str) -> list[str]:
-    seen, out = set(), []
-    for t in re.split(r"[,\n]", text):
-        t = " ".join(t.split()).lower()
-        if t and t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
-
-
-def insert_keywords(conn, app_id: int, pairs, source: str) -> int:
-    before = conn.total_changes
-    conn.executemany(
-        "INSERT OR IGNORE INTO keywords (app_id, country, term, locale, source, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        [(app_id, c, t, loc, source, db.now()) for c, t, loc in pairs],
-    )
-    return conn.total_changes - before
-
-
-@app.get("/api/apps/{app_id}/keywords")
-def list_keywords(app_id: int):
-    with db.tx() as conn:
-        get_app(conn, app_id)
-        rows = conn.execute(db.KEYWORDS_WITH_RANKS, {"app_id": app_id}).fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        d["top_apps"] = json.loads(d["top_apps"]) if d["top_apps"] else []
-        out.append(d)
-    return out
-
-
-@app.post("/api/apps/{app_id}/keywords")
-def add_keywords(app_id: int, body: KeywordsIn):
-    countries = [c.lower() for c in body.countries if c.lower() in COUNTRIES]
-    terms = split_terms(body.terms)
-    if not countries or not terms:
-        raise HTTPException(400, "Pick at least one country and one keyword")
-    with db.tx() as conn:
-        get_app(conn, app_id)
-        added = insert_keywords(conn, app_id, [(c, t, None) for c in countries for t in terms], "manual")
-    return {"added": added}
-
-
-@app.delete("/api/keywords/{keyword_id}")
-def delete_keyword(keyword_id: int):
-    with db.tx() as conn:
-        conn.execute("DELETE FROM keywords WHERE id = ?", (keyword_id,))
-    return {"ok": True}
-
-
-@app.get("/api/keywords/{keyword_id}/history")
-def keyword_history(keyword_id: int):
-    with db.tx() as conn:
-        rows = conn.execute(
-            "SELECT checked_at, rank, total_results FROM checks WHERE keyword_id = ?"
-            " ORDER BY checked_at DESC LIMIT 90",
-            (keyword_id,),
-        ).fetchall()
-    return [dict(r) for r in reversed(rows)]
-
-
-class AscImportIn(BaseModel):
-    include_secondary: bool = False
-    replace: bool = False
-
-
-@app.post("/api/apps/{app_id}/import-asc")
-def import_asc(app_id: int, body: AscImportIn):
-    with db.tx() as conn:
-        get_app(conn, app_id)
-    try:
-        version, by_locale = asc.fetch_keywords(app_id)
-    except asc.AscError as e:
-        raise HTTPException(400, str(e))
-
-    pairs, skipped = [], []
-    for locale, words in by_locale.items():
-        stores = storefronts_for(locale, body.include_secondary)
-        if not stores:
-            skipped.append(locale)
-        pairs += [(c, w.lower(), locale) for c in stores for w in words]
-    with db.tx() as conn:
-        if body.replace:
-            conn.execute("DELETE FROM keywords WHERE app_id = ? AND source = 'asc'", (app_id,))
-        added = insert_keywords(conn, app_id, pairs, "asc")
-    return {"version": version, "locales": len(by_locale), "added": added, "skipped_locales": skipped}
-
-
-# ---------- summary / export ----------
-
-def delta(r) -> int:
-    """Positions gained since the previous check (entering top-200 counts as a gain)."""
-    if not r["prev_checked_at"]:
-        return 0
-    cur = r["rank"] or 201
-    prev = r["prev_rank"] or 201
-    return prev - cur
-
-
-def bucket_stats(rows) -> dict:
-    ranks = [r["rank"] for r in rows if r["rank"] is not None]
-    return {
-        "keywords": len(rows),
-        "checked": sum(1 for r in rows if r["checked_at"]),
-        "ranked": len(ranks),
-        "top10": sum(1 for r in ranks if r <= 10),
-        "top50": sum(1 for r in ranks if r <= 50),
-        "best": min(ranks) if ranks else None,
-        "avg": round(sum(ranks) / len(ranks), 1) if ranks else None,
-        "improved": sum(1 for r in rows if delta(r) > 0),
-        "declined": sum(1 for r in rows if delta(r) < 0),
-    }
-
-
-@app.get("/api/apps/{app_id}/summary")
-def summary(app_id: int):
-    with db.tx() as conn:
-        get_app(conn, app_id)
-        rows = [dict(r) for r in conn.execute(db.KEYWORDS_WITH_RANKS, {"app_id": app_id}).fetchall()]
-        last = conn.execute("SELECT MAX(checked_at) AS t FROM checks c JOIN keywords k ON k.id = c.keyword_id"
-                            " WHERE k.app_id = ?", (app_id,)).fetchone()["t"]
-    by_country: dict[str, list] = {}
-    for r in rows:
-        by_country.setdefault(r["country"], []).append(r)
-    countries = [{"country": c, "name": COUNTRIES.get(c, c.upper()), **bucket_stats(rs)}
-                 for c, rs in by_country.items()]
-    countries.sort(key=lambda c: (-c["top10"], -c["top50"], -c["ranked"], c["country"]))
-    return {"total": bucket_stats(rows), "countries": countries, "last_checked": last}
-
-
-@app.get("/api/apps/{app_id}/export.csv")
-def export_csv(app_id: int):
-    rows = list_keywords(app_id)
+@app.get("/api/markets/{locale}/export.csv")
+def export_market(locale: str):
+    m = market_or_404(locale)
+    data = market_keywords(locale, limit=1000)
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["country", "keyword", "rank", "previous_rank", "results", "checked_at", "source", "locale", "top1"])
-    for r in rows:
-        w.writerow([r["country"], r["term"], r["rank"] or "", r["prev_rank"] or "", r["total_results"] or "",
-                    r["checked_at"] or "", r["source"], r["locale"] or "",
-                    r["top_apps"][0]["name"] if r["top_apps"] else ""])
+    w.writerow(["market", "locale", "storefront", "rank", "keyword", "popularity", "previous_rank",
+                "hits", "best_prefix", "best_position", "scanned_at"])
+    scanned = data["scan"]["scanned_at"] if data["scan"] else ""
+    for r in data["items"]:
+        w.writerow([m["name"], locale, m["country"], r["rank"], r["term"], r["score"], r["prev_rank"] or "",
+                    r["hits"], r["best_prefix"], r["best_pos"], scanned])
     return StreamingResponse(
         iter(["﻿" + buf.getvalue()]), media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="aso-{app_id}.csv"'},
+        headers={"Content-Disposition": f'attachment; filename="aso-{locale}.csv"'},
     )
 
 
-# ---------- runs ----------
+# ---------- scans ----------
 
-class RunIn(BaseModel):
-    app_id: int | None = None
+class ScanIn(BaseModel):
+    locales: list[str] | None = None
 
 
-@app.post("/api/runs")
-def start_run(body: RunIn):
+@app.post("/api/scans")
+def start_scan(body: ScanIn):
     try:
-        return {"run_id": checker.start(body.app_id)}
-    except checker.RunInProgress:
-        raise HTTPException(409, "A check is already running")
+        return {"scan_id": scanner.start(body.locales)}
+    except scanner.ScanInProgress:
+        raise HTTPException(409, "A scan is already running")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
-@app.get("/api/runs/latest")
-def latest_run():
+@app.get("/api/scans/latest")
+def latest_scan():
     with db.tx() as conn:
-        row = conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+        row = conn.execute("SELECT * FROM scans ORDER BY id DESC LIMIT 1").fetchone()
     return dict(row) if row else None

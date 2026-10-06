@@ -1,23 +1,28 @@
 "use strict";
 
-const $ = (s) => document.querySelector(s);
-const state = { meta: null, apps: [], appId: null, keywords: [], summary: null,
-  sort: { key: "rank", dir: 1 }, country: "", openHistory: null };
+const $ = (s, root = document) => root.querySelector(s);
+const PAGE = 100;
+const state = { meta: null, overview: [], open: new Map() }; // locale -> {data, q, limit}
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const flag = (cc) => cc.toUpperCase().replace(/./g, (c) => String.fromCodePoint(0x1f1a5 + c.charCodeAt(0)));
-const countryName = (cc) => state.meta?.countries[cc] || cc.toUpperCase();
-const fmtDate = (s) => s ? new Date(s).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" }) : "—";
+const flag = (cc) => cc ? cc.toUpperCase().replace(/./g, (c) => String.fromCodePoint(0x1f1a5 + c.charCodeAt(0))) : "";
+const fmtDate = (s) => s ? new Date(s).toLocaleDateString("ru-RU") : "—";
+const fmtDateTime = (s) => s ? new Date(s).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" }) : "—";
+const plural = (n, one, few, many) => {
+  const m10 = n % 10, m100 = n % 100;
+  return m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many;
+};
+const marketOf = (loc) => state.meta.markets.find((m) => m.locale === loc);
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     ...opts,
-    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+    headers: { "Content-Type": "application/json" },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const data = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(data?.detail ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail)) : res.statusText);
+  if (!res.ok) throw new Error(data?.detail || res.statusText);
   return data;
 }
 
@@ -29,317 +34,314 @@ function toast(msg) {
   toast.timer = setTimeout(() => t.classList.add("hidden"), 4000);
 }
 
-// Positions gained since the previous check; leaving/entering top-200 counts as 201.
-function delta(k) {
-  if (!k.prev_checked_at) return 0;
-  return (k.prev_rank || 201) - (k.rank || 201);
+function storageGet(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
+function storageSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+
+// ---------- tiles ----------
+
+function tileClass(m) {
+  if (!m.scanned_at) return "none";
+  const ageH = (Date.now() - new Date(m.scanned_at)) / 36e5;
+  if (state.meta.scan_interval_hours > 0 && ageH > state.meta.scan_interval_hours * 2 + 6) return "stale";
+  return m.new >= 10 ? "hot" : "";
 }
 
-function rankBadge(rank, checked) {
-  if (!checked) return `<span class="rank none">?</span>`;
-  if (!rank) return `<span class="rank none">—</span>`;
-  const cls = rank <= 10 ? "r1" : rank <= 50 ? "r2" : rank <= 100 ? "r3" : "r4";
-  return `<span class="rank ${cls}">${rank}</span>`;
-}
-
-function deltaCell(k) {
-  const d = delta(k);
-  if (!d) return k.prev_checked_at ? `<span class="muted">·</span>` : "";
-  if (!k.prev_rank) return `<span class="up">new</span>`;
-  if (!k.rank) return `<span class="down">out</span>`;
-  return d > 0 ? `<span class="up">▲${d}</span>` : `<span class="down">▼${-d}</span>`;
-}
-
-// ---------- loading ----------
-
-async function loadApps(selectId) {
-  state.apps = await api("/api/apps");
-  const sel = $("#appSelect");
-  sel.innerHTML = state.apps.map((a) => `<option value="${a.id}">${esc(a.name)} (${a.keyword_count})</option>`).join("");
-  const saved = Number(localStorageGet("appId"));
-  const pick = selectId || (state.apps.some((a) => a.id === state.appId) ? state.appId
-    : state.apps.some((a) => a.id === saved) ? saved : state.apps[0]?.id);
-  state.appId = pick || null;
-  sel.value = pick || "";
-  sel.classList.toggle("hidden", !state.apps.length);
-  $("#empty").classList.toggle("hidden", !!state.apps.length);
-  $("#dashboard").classList.toggle("hidden", !state.apps.length);
-  if (pick) await loadApp();
-}
-
-async function loadApp() {
-  localStorageSet("appId", state.appId);
-  const app = state.apps.find((a) => a.id === state.appId);
-  $("#appIcon").src = app.icon || "";
-  $("#appName").textContent = app.name;
-  $("#exportBtn").href = `/api/apps/${app.id}/export.csv`;
-  const [kws, summary] = await Promise.all([
-    api(`/api/apps/${app.id}/keywords`), api(`/api/apps/${app.id}/summary`)]);
-  state.keywords = kws;
-  state.summary = summary;
-  $("#appMeta").textContent = `ID ${app.id}${app.seller ? " · " + app.seller : ""} · последняя проверка: ${fmtDate(summary.last_checked)}`;
-  renderCards();
-  renderCountries();
-  renderCountryFilter();
-  renderKeywords();
-}
-
-function localStorageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
-function localStorageSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
-
-// ---------- rendering ----------
-
-function renderCards() {
-  const t = state.summary.total;
-  const cards = [
-    ["Ключей", t.keywords],
-    ["Стран", state.summary.countries.length],
-    ["В топ‑200", t.ranked],
-    ["В топ‑50", t.top50],
-    ["В топ‑10", t.top10],
-    ["Выросли / упали", `<span class="up">${t.improved}</span> / <span class="down">${t.declined}</span>`],
-  ];
-  $("#cards").innerHTML = cards.map(([l, v]) => `<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`).join("");
-}
-
-function renderCountries() {
-  const rows = state.summary.countries;
-  $("#countryTable tbody").innerHTML = rows.map((c) => {
-    const w = (n) => (c.keywords ? (n / c.keywords) * 100 : 0).toFixed(1);
-    return `<tr data-cc="${c.country}" class="${state.country === c.country ? "active" : ""}">
-      <td><span class="flag">${flag(c.country)}</span>${esc(c.name)}</td>
-      <td class="num">${c.keywords}</td>
-      <td class="num">${c.top10 || ""}</td>
-      <td class="num">${c.top50 || ""}</td>
-      <td class="num">${c.ranked || ""}</td>
-      <td class="num">${c.best ? rankBadge(c.best, true) : ""}</td>
-      <td><div class="cov" title="топ‑10 / топ‑50 / топ‑200 от всех ключей">
-        <span style="width:${w(c.top10)}%;background:var(--r1)"></span>
-        <span style="width:${w(c.top50 - c.top10)}%;background:var(--r2)"></span>
-        <span style="width:${w(c.ranked - c.top50)}%;background:var(--r4)"></span>
-      </div></td></tr>`;
-  }).join("") || `<tr><td colspan="7" class="muted">Пока нет ключевых слов</td></tr>`;
-}
-
-function renderCountryFilter() {
-  const ccs = [...new Set(state.keywords.map((k) => k.country))].sort();
-  if (state.country && !ccs.includes(state.country)) state.country = "";
-  $("#countryFilter").innerHTML = `<option value="">Все страны</option>` +
-    ccs.map((c) => `<option value="${c}">${flag(c)} ${esc(countryName(c))}</option>`).join("");
-  $("#countryFilter").value = state.country;
-}
-
-function filteredKeywords() {
-  const q = $("#search").value.trim().toLowerCase();
-  const rf = $("#rankFilter").value;
-  const list = state.keywords.filter((k) => {
-    if (state.country && k.country !== state.country) return false;
-    if (q && !k.term.includes(q)) return false;
-    if (rf === "10") return k.rank && k.rank <= 10;
-    if (rf === "50") return k.rank && k.rank <= 50;
-    if (rf === "ranked") return !!k.rank;
-    if (rf === "none") return k.checked_at && !k.rank;
-    if (rf === "up") return delta(k) > 0;
-    if (rf === "down") return delta(k) < 0;
-    return true;
-  });
-  const { key, dir } = state.sort;
-  const val = (k) => key === "rank" ? (k.rank || 9999) : key === "delta" ? -delta(k) : k[key];
-  return list.sort((a, b) => (val(a) > val(b) ? 1 : val(a) < val(b) ? -1 : 0) * dir || a.term.localeCompare(b.term));
-}
-
-function renderKeywords() {
-  const list = filteredKeywords();
-  $("#kwEmpty").classList.toggle("hidden", list.length > 0);
-  $("#kwTable tbody").innerHTML = list.map((k) => {
-    const top = k.top_apps[0];
-    const leader = top ? `<div class="leader ${top.id === state.appId ? "me" : ""}" title="${esc(k.top_apps.map((a, i) => `${i + 1}. ${a.name}`).join("\n"))}">
-      <img src="${esc(top.icon)}" alt="" loading="lazy"><span>${esc(top.name)}</span></div>` : "";
-    return `<tr data-id="${k.id}">
-      <td title="${esc(countryName(k.country))}${k.locale ? " · " + esc(k.locale) : ""}"><span class="flag">${flag(k.country)}</span>${k.country.toUpperCase()}</td>
-      <td class="hist" title="История позиций">${esc(k.term)}</td>
-      <td class="num">${rankBadge(k.rank, k.checked_at)}</td>
-      <td class="num">${deltaCell(k)}</td>
-      <td>${leader}</td>
-      <td class="num"><button class="icon-btn del" title="Удалить">✕</button></td>
-    </tr>`;
+function renderTiles() {
+  $("#tiles").innerHTML = state.overview.map((m) => {
+    const lead = m.leaders[0];
+    const moves = m.has_previous ? ` · <span title="новых в топ‑100">+${m.new} new</span>` : "";
+    return `<button class="tile ${tileClass(m)}" data-loc="${m.locale}" title="${esc(m.leaders.join(" · "))}">
+      <span class="name"><span class="flag">${flag(m.country)}</span>${esc(m.name)}</span>
+      ${lead ? `<span class="lead"><small>#1</small> ${esc(lead)}</span>` : `<span class="lead"><small>— нет данных</small></span>`}
+      <span class="sub">${m.scanned_at ? `${m.unique_terms} ${plural(m.unique_terms, "запрос", "запроса", "запросов")}${moves}` : "не сканировался"}</span>
+      ${m.shares_with ? `<span class="sub">= ${esc(marketOf(m.shares_with).name)}</span>` : ""}
+    </button>`;
   }).join("");
 }
 
-async function toggleHistory(tr) {
-  const existing = tr.nextElementSibling;
-  if (existing?.classList.contains("history")) { existing.remove(); return; }
-  const id = tr.dataset.id;
-  const hist = await api(`/api/keywords/${id}/history`);
-  const row = document.createElement("tr");
-  row.className = "history";
-  row.innerHTML = `<td colspan="6">${hist.length ? sparkline(hist) : '<span class="muted">Ещё не проверялось</span>'}</td>`;
-  tr.after(row);
+// ---------- market sections ----------
+
+function marketHeadStats(m) {
+  if (!m.scanned_at) return `<span class="stats">ещё не сканировался</span>`;
+  return `<span class="stats"><b>${m.unique_terms}</b> запросов · ${m.prefixes} префиксов · ${fmtDate(m.scanned_at)}` +
+    (m.leaders[0] ? ` &nbsp; Top: <b>${esc(m.leaders[0])}</b>` : "") + `</span>`;
 }
 
-function sparkline(hist) {
-  const W = 520, H = 70, P = 6, MAX = 201;
-  const xs = (i) => P + (hist.length === 1 ? (W - 2 * P) / 2 : (i / (hist.length - 1)) * (W - 2 * P));
-  const ys = (r) => P + ((Math.min(r || MAX, MAX) - 1) / (MAX - 1)) * (H - 2 * P);
-  const pts = hist.map((h, i) => `${xs(i).toFixed(1)},${ys(h.rank).toFixed(1)}`).join(" ");
-  const dots = hist.map((h, i) => `<circle cx="${xs(i).toFixed(1)}" cy="${ys(h.rank).toFixed(1)}" r="3" fill="var(--accent)"><title>${fmtDate(h.checked_at)}: ${h.rank || "нет в топ‑200"}</title></circle>`).join("");
-  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;height:${H}px" role="img" aria-label="История позиций">
-    <line x1="${P}" x2="${W - P}" y1="${ys(10)}" y2="${ys(10)}" stroke="var(--border)" stroke-dasharray="3 3"/>
-    <line x1="${P}" x2="${W - P}" y1="${ys(50)}" y2="${ys(50)}" stroke="var(--border)" stroke-dasharray="3 3"/>
-    <polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2"/>${dots}</svg>
-    <div class="muted">верх — позиция 1, пунктир — топ‑10 и топ‑50, низ — вне топ‑200</div>`;
+function renderMarkets() {
+  $("#markets").innerHTML = state.overview.map((m) => `
+    <section class="market ${state.open.has(m.locale) ? "open" : ""}" id="m-${m.locale}" data-loc="${m.locale}">
+      <div class="market-head">
+        <span class="title"><span class="flag">${flag(m.country)}</span>${esc(m.name)}</span>
+        ${marketHeadStats(m)}
+        <span class="spacer"></span>
+        <button class="act-prompt" ${m.scanned_at ? "" : "disabled"}>Copy /strategy prompt</button>
+        <span class="chev">▼</span>
+      </div>
+      <div class="market-body ${state.open.has(m.locale) ? "" : "hidden"}"></div>
+    </section>`).join("");
+  for (const loc of state.open.keys()) renderMarketBody(loc);
 }
 
-// ---------- dialogs ----------
-
-function openDialog(title, bodyHtml, onOk, okLabel = "OK") {
-  const dlg = $("#dlg");
-  $("#dlgTitle").textContent = title;
-  $("#dlgBody").innerHTML = bodyHtml;
-  $("#dlgError").textContent = "";
-  $("#dlgOk").textContent = okLabel;
-  $("#dlgOk").disabled = false;
-  dlg.onclose = null;
-  $("#dlgForm").onsubmit = async (e) => {
-    if (e.submitter?.value !== "ok") return;
-    e.preventDefault();
-    $("#dlgOk").disabled = true;
-    try {
-      await onOk(new FormData($("#dlgForm")));
-      dlg.close();
-    } catch (err) {
-      $("#dlgError").textContent = err.message;
-    } finally {
-      $("#dlgOk").disabled = false;
-    }
-  };
-  dlg.showModal();
+async function loadMarket(loc) {
+  const st = state.open.get(loc);
+  const params = new URLSearchParams({ limit: st.limit, q: st.q });
+  st.data = await api(`/api/markets/${encodeURIComponent(loc)}?${params}`);
+  renderMarketBody(loc);
 }
 
-function addAppDialog() {
-  openDialog("Добавить приложение", `
-    <label>App Store ID или ссылка</label>
-    <input type="text" name="app" placeholder="https://apps.apple.com/app/id1234567890" required>
-    <label>Витрина для поиска приложения</label>
-    <input type="text" name="country" value="us" maxlength="2">`,
-  async (fd) => {
-    const app = await api("/api/apps", { method: "POST", body: { app: fd.get("app"), country: fd.get("country") || "us" } });
-    await loadApps(app.id);
-    toast(`Добавлено: ${app.name}`);
-  }, "Добавить");
+function seedText(seeds) {
+  return seeds.map((s) => `${s.alphabet}${s.depth === 2 ? " ×2" : ""}`).join(" + ");
 }
 
-function addKeywordsDialog() {
-  const ccs = Object.entries(state.meta.countries).sort((a, b) => a[1].localeCompare(b[1]));
-  openDialog("Добавить ключевые слова", `
-    <label>Ключевые слова (через запятую или с новой строки)</label>
-    <textarea name="terms" required placeholder="dream dictionary, сонник, dream meaning"></textarea>
-    <label>Страны</label>
-    <div class="country-pick">${ccs.map(([cc, n]) =>
-      `<label><input type="checkbox" name="cc" value="${cc}" ${cc === state.country ? "checked" : ""}>${flag(cc)} ${esc(n)}</label>`).join("")}</div>`,
-  async (fd) => {
-    const r = await api(`/api/apps/${state.appId}/keywords`, { method: "POST",
-      body: { countries: fd.getAll("cc"), terms: fd.get("terms") } });
-    await loadApps();
-    toast(`Добавлено ключей: ${r.added}. Запустите проверку позиций.`);
-  }, "Добавить");
-}
+function renderMarketBody(loc) {
+  const sec = document.getElementById(`m-${loc}`);
+  const st = state.open.get(loc);
+  if (!sec || !st?.data) return;
+  const { market, scan, items, total, has_previous, trend_dates } = st.data;
+  const body = $(".market-body", sec);
+  const shared = market.shares_with ? marketOf(market.shares_with) : null;
+  const info = `
+    <div class="meta-box">
+      <div class="hdr">Параметры сбора
+        <span class="pill">App Store ${market.country.toUpperCase()} · ${market.storefront}</span>
+        <span class="pill">${esc(market.locale)}</span>
+        ${scan ? `<span class="pill">${fmtDateTime(scan.scanned_at)}</span>` : ""}
+      </div>
+      <dl class="meta-grid">
+        <dt>Алфавиты</dt><dd class="mono">${esc(seedText(market.seeds))}</dd>
+        <dt>Префиксов</dt><dd>${scan ? scan.prefixes : "—"}</dd>
+        <dt>Уникальных</dt><dd>${scan ? scan.unique_terms : "—"} запросов, в рейтинге топ‑${state.meta.top_n}</dd>
+        <dt>Сканов</dt><dd>${trend_dates.length ? `${trend_dates.length} (с ${fmtDate(trend_dates[0])})` : "—"}</dd>
+        ${shared ? `<dt>Совпадает с</dt><dd>${esc(shared.name)}: та же витрина и тот же алфавит</dd>` : ""}
+      </dl>
+    </div>`;
 
-function importDialog() {
-  if (!state.meta.asc_configured) {
-    openDialog("Импорт из App Store Connect", `<p>Ключ API App Store Connect не настроен.
-      Задайте <code>ASC_KEY_ID</code>, <code>ASC_ISSUER_ID</code> и положите .p8‑файл в <code>secrets/</code> (см. README).</p>`, async () => {});
+  if (!scan) {
+    body.innerHTML = info + `<div class="empty">Данных нет. <button class="act-scan">Сканировать этот рынок</button></div>`;
     return;
   }
-  openDialog("Импорт из App Store Connect", `
-    <p class="muted">Берёт поле Keywords из каждой локализации текущей версии приложения и сопоставляет локаль со страной (fr‑FR → FR, es‑MX → MX…).</p>
-    <label class="check"><input type="checkbox" name="secondary"> Также дополнительные витрины локали (de‑DE → AT, CH; es‑MX → AR, CO…)</label>
-    <label class="check"><input type="checkbox" name="replace"> Удалить ранее импортированные из ASC ключи</label>`,
-  async (fd) => {
-    const r = await api(`/api/apps/${state.appId}/import-asc`, { method: "POST",
-      body: { include_secondary: fd.has("secondary"), replace: fd.has("replace") } });
-    await loadApps();
-    toast(`Версия ${r.version}: ${r.locales} локалей, добавлено ${r.added} ключей` +
-      (r.skipped_locales.length ? `. Пропущены: ${r.skipped_locales.join(", ")}` : ""));
-  }, "Импортировать");
+
+  const rows = items.map((k) => `
+    <tr class="row" data-term="${esc(k.term)}">
+      <td>${esc(k.term)}</td>
+      <td><span class="pos ${k.rank <= 10 ? "p1" : k.rank <= 50 ? "p2" : "p3"}">#${k.rank}</span></td>
+      <td>${deltaCell(k, has_previous)}</td>
+      <td>${sparkline(k.trend)}</td>
+      <td><div class="bar" title="популярность ${k.score}"><span style="width:${Math.max(2, k.score)}%"></span></div></td>
+      <td class="mono muted" title="кратчайший префикс и позиция в подсказках">${esc(k.best_prefix)} → ${k.best_pos}</td>
+      <td class="muted">${fmtDate(scan.scanned_at)}</td>
+    </tr>`).join("");
+
+  body.innerHTML = info + `
+    <div class="toolbar">
+      <input type="search" class="market-q" placeholder="Фильтр запросов" value="${esc(st.q)}">
+      <span class="muted">${total} ${plural(total, "запрос", "запроса", "запросов")}</span>
+      <span class="spacer"></span>
+      <a href="/api/markets/${encodeURIComponent(loc)}/export.csv"><button>CSV</button></a>
+      <button class="act-scan">Пересканировать</button>
+    </div>
+    <div class="table-wrap"><table class="kw">
+      <thead><tr><th>Keyword</th><th>Position</th><th>Δ</th><th>Trend</th><th>Popularity</th><th>Prefix → pos</th><th>Last</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="7" class="empty">Ничего не найдено</td></tr>`}</tbody>
+    </table></div>
+    ${items.length < total ? `<button class="more act-more">Показать ещё (${total - items.length})</button>` : ""}`;
+  const input = $(".market-q", body);
+  if (st.focus) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); st.focus = false; }
 }
 
-// ---------- runs ----------
-
-async function pollRun() {
-  const run = await api("/api/runs/latest").catch(() => null);
-  const running = run?.status === "running";
-  $("#runBtn").disabled = running;
-  if (running) {
-    const pct = run.total ? Math.round((run.done / run.total) * 100) : 0;
-    const left = Math.ceil(((run.total - run.done) * 3.3) / 60);
-    $("#runStatus").textContent = `Проверка: ${run.done}/${run.total} (${pct}%) · ~${left} мин`;
-  } else {
-    $("#runStatus").textContent = run?.status === "failed" ? `Последняя проверка с ошибкой: ${run.error}` : "";
-  }
-  if (pollRun.wasRunning && !running && state.appId) await loadApp();
-  if (running && state.appId && run.done !== pollRun.lastDone) {
-    pollRun.lastDone = run.done;
-    if (run.done % 20 === 0) loadApp(); // refresh table now and then while running
-  }
-  pollRun.wasRunning = running;
-  setTimeout(pollRun, running ? 3000 : 15000);
+function deltaCell(k, hasPrev) {
+  if (!hasPrev) return "";
+  if (k.is_new) return `<span class="d-new">new</span>`;
+  if (!k.prev_rank) return "";
+  const d = k.prev_rank - k.rank;
+  if (d === 0) return `<span class="d-eq">=</span>`;
+  return d > 0 ? `<span class="d-up">↑${d}</span>` : `<span class="d-down">↓${-d}</span>`;
 }
 
-async function startRun() {
+// Rank history: higher line = better position; gaps where the term was outside the top.
+function sparkline(trend) {
+  if (!trend || trend.filter((r) => r != null).length < 2) return "";
+  const W = 74, H = 20, P = 2;
+  const vals = trend.filter((r) => r != null);
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  const x = (i) => P + (i / (trend.length - 1)) * (W - 2 * P);
+  const y = (r) => hi === lo ? H / 2 : P + ((r - lo) / (hi - lo)) * (H - 2 * P);
+  let d = "", pen = false;
+  trend.forEach((r, i) => {
+    if (r == null) { pen = false; return; }
+    d += `${pen ? "L" : "M"}${x(i).toFixed(1)},${y(r).toFixed(1)}`;
+    pen = true;
+  });
+  return `<svg class="spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true">
+    <path d="${d}" fill="none" stroke="var(--muted)" stroke-width="1.4"/></svg>`;
+}
+
+async function toggleApps(tr, loc) {
+  const next = tr.nextElementSibling;
+  if (next?.classList.contains("apps")) { next.remove(); return; }
+  const row = document.createElement("tr");
+  row.className = "apps";
+  row.innerHTML = `<td colspan="7" class="muted">Загружаю топ приложений по запросу…</td>`;
+  tr.after(row);
   try {
-    await api("/api/runs", { method: "POST", body: { app_id: state.appId } });
-    pollRun.wasRunning = true;
-    toast("Проверка запущена: ~3 сек на ключ из‑за лимитов Apple");
-    $("#runBtn").disabled = true;
+    const apps = await api(`/api/top-apps?term=${encodeURIComponent(tr.dataset.term)}&country=${marketOf(loc).country}`);
+    row.innerHTML = `<td colspan="7"><div class="apps-list">${apps.map((a, i) => `
+      <a class="app" href="${esc(a.url)}" target="_blank" rel="noopener">
+        <img src="${esc(a.icon)}" alt="" loading="lazy">
+        <div><b>${i + 1}. ${esc(a.name)}</b><small>${esc(a.seller)}</small></div></a>`).join("")
+      || '<span class="muted">Приложений не найдено</span>'}</div></td>`;
+  } catch (e) {
+    row.innerHTML = `<td colspan="7" class="muted">${esc(e.message)}</td>`;
+  }
+}
+
+async function toggleMarket(loc, forceOpen = false) {
+  const sec = document.getElementById(`m-${loc}`);
+  const isOpen = state.open.has(loc);
+  if (isOpen && !forceOpen) {
+    state.open.delete(loc);
+    sec.classList.remove("open");
+    $(".market-body", sec).classList.add("hidden");
+  } else if (!isOpen) {
+    state.open.set(loc, { q: "", limit: PAGE, data: null });
+    sec.classList.add("open");
+    const body = $(".market-body", sec);
+    body.classList.remove("hidden");
+    body.innerHTML = `<div class="empty">Загрузка…</div>`;
+    await loadMarket(loc);
+  }
+  storageSet("open", [...state.open.keys()]);
+}
+
+// ---------- strategy prompt ----------
+
+async function copyPrompt(loc) {
+  const m = marketOf(loc);
+  const data = await api(`/api/markets/${encodeURIComponent(loc)}?limit=150`);
+  const lines = data.items.map((k) => {
+    let delta = "";
+    if (data.has_previous) delta = k.is_new ? " (новый в топе)" : k.prev_rank && k.prev_rank !== k.rank ? ` (было #${k.prev_rank})` : "";
+    return `#${k.rank} ${k.term} — популярность ${k.score}${delta}`;
+  });
+  const text = `Ты ASO-эксперт по App Store. Рынок: ${m.name} (витрина ${m.country.toUpperCase()}, локаль ASC ${m.locale}).
+
+Ниже топ поисковых запросов этого рынка, собранный из подсказок поиска App Store (перебор префиксов). Популярность относительная: 100 — самый популярный запрос рынка; абсолютных объёмов Apple не даёт. Скан от ${fmtDate(data.scan.scanned_at)}.
+
+${lines.join("\n")}
+
+Задачи:
+1. Сгруппируй запросы в тематические кластеры (бренды, категории, функции) и отметь, какие из них небрендовые — по ним реально ранжироваться новому приложению.
+2. Выдели растущие и новые запросы — сигналы спроса и трендов.
+3. Предложи 5–10 идей приложений или ниш под этот рынок с обоснованием по данным.
+4. Для лучшей идеи предложи метаданные на языке рынка: Title (≤30 символов), Subtitle (≤30), Keywords (≤100, через запятую без пробелов, без повторов слов из Title/Subtitle).`;
+  await navigator.clipboard.writeText(text);
+  toast(`Промпт для ${m.name} скопирован`);
+}
+
+// ---------- global search ----------
+
+let searchTimer;
+async function runGlobalSearch() {
+  const q = $("#globalSearch").value.trim();
+  const box = $("#searchBox");
+  if (q.length < 2) { box.classList.add("hidden"); return; }
+  const res = await api(`/api/search?q=${encodeURIComponent(q)}`);
+  box.classList.remove("hidden");
+  $("#searchResults").innerHTML = res.length ? `<div class="table-wrap"><table class="kw">
+    <thead><tr><th>Запрос</th><th>Рынков</th><th>Позиции по гео</th></tr></thead>
+    <tbody>${res.map((r) => `<tr><td>${esc(r.term)}</td><td>${r.markets.length}</td>
+      <td><div class="chips">${r.markets.map((m) =>
+        `<span class="chip" data-loc="${m.locale}" title="${esc(m.name)} · популярность ${m.score}">${flag(m.country)} ${esc(m.name)} <b>#${m.rank}</b></span>`).join("")}</div></td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="muted">«${esc(q)}» не найден в топе ни одного рынка.</div>`;
+}
+
+// ---------- scans ----------
+
+async function pollScan() {
+  const scan = await api("/api/scans/latest").catch(() => null);
+  const running = scan?.status === "running";
+  $("#scanAllBtn").disabled = running;
+  if (running) {
+    const pct = scan.total ? Math.min(99, Math.round((scan.done / scan.total) * 100)) : 0;
+    $("#scanStatus").textContent = `Сканирую ${scan.current || ""}: ${pct}%`;
+  } else if (scan?.status === "failed") {
+    $("#scanStatus").textContent = `Скан прерван: ${scan.error}`;
+  } else {
+    $("#scanStatus").textContent = scan ? `Последний скан: ${fmtDateTime(scan.finished_at)}` : "";
+  }
+  // Refresh as markets finish, and once more when the scan ends.
+  if ((running && scan.current !== pollScan.current) || (pollScan.running && !running)) await refresh();
+  pollScan.current = scan?.current;
+  pollScan.running = running;
+  setTimeout(pollScan, running ? 4000 : 30000);
+}
+
+async function startScan(locales) {
+  try {
+    await api("/api/scans", { method: "POST", body: { locales } });
+    toast(locales ? "Скан рынка запущен" : "Скан всех рынков запущен — это займёт пару часов");
+    $("#scanAllBtn").disabled = true;
   } catch (e) { toast(e.message); }
+}
+
+async function refresh() {
+  state.overview = await api("/api/markets");
+  renderTiles();
+  // Keep open sections and their filters while updating headers.
+  for (const m of state.overview) {
+    const sec = document.getElementById(`m-${m.locale}`);
+    if (sec) $(".stats", sec).outerHTML = marketHeadStats(m);
+  }
+  if (!$("#markets").children.length) renderMarkets();
+  for (const loc of state.open.keys()) loadMarket(loc);
 }
 
 // ---------- events ----------
 
-$("#appSelect").onchange = (e) => { state.appId = Number(e.target.value); state.country = ""; loadApp(); };
-$("#addAppBtn").onclick = addAppDialog;
-$("#emptyAddBtn").onclick = addAppDialog;
-$("#addKwBtn").onclick = addKeywordsDialog;
-$("#importBtn").onclick = importDialog;
-$("#runBtn").onclick = startRun;
-$("#deleteAppBtn").onclick = async () => {
-  const app = state.apps.find((a) => a.id === state.appId);
-  if (!confirm(`Удалить «${app.name}» вместе со всеми ключами и историей?`)) return;
-  await api(`/api/apps/${app.id}`, { method: "DELETE" });
-  state.appId = null;
-  await loadApps();
+$("#tiles").onclick = (e) => {
+  const tile = e.target.closest(".tile");
+  if (!tile) return;
+  const loc = tile.dataset.loc;
+  toggleMarket(loc, true);
+  document.getElementById(`m-${loc}`).scrollIntoView({ behavior: "smooth" });
 };
-$("#search").oninput = renderKeywords;
-$("#rankFilter").onchange = renderKeywords;
-$("#countryFilter").onchange = (e) => { state.country = e.target.value; renderCountries(); renderKeywords(); };
-$("#countryTable tbody").onclick = (e) => {
-  const tr = e.target.closest("tr[data-cc]");
-  if (!tr) return;
-  state.country = state.country === tr.dataset.cc ? "" : tr.dataset.cc;
-  $("#countryFilter").value = state.country;
-  renderCountries();
-  renderKeywords();
+$("#searchResults").onclick = (e) => {
+  const chip = e.target.closest(".chip");
+  if (chip) $("#tiles").onclick({ target: $(`.tile[data-loc="${chip.dataset.loc}"]`) });
 };
-$("#kwTable thead").onclick = (e) => {
-  const key = e.target.dataset.sort;
-  if (!key) return;
-  state.sort = { key, dir: state.sort.key === key ? -state.sort.dir : 1 };
-  renderKeywords();
-};
-$("#kwTable tbody").onclick = async (e) => {
-  const tr = e.target.closest("tr[data-id]");
-  if (!tr) return;
-  if (e.target.closest(".del")) {
-    await api(`/api/keywords/${tr.dataset.id}`, { method: "DELETE" });
-    await loadApp();
-    return;
-  }
-  if (e.target.closest(".hist")) toggleHistory(tr);
-};
+$("#globalSearch").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(runGlobalSearch, 250); };
+$("#scanAllBtn").onclick = () => startScan(null);
+
+$("#markets").addEventListener("click", (e) => {
+  const sec = e.target.closest(".market");
+  if (!sec) return;
+  const loc = sec.dataset.loc;
+  if (e.target.closest(".act-prompt")) { copyPrompt(loc).catch((err) => toast(err.message)); return; }
+  if (e.target.closest(".act-scan")) { startScan([loc]); return; }
+  if (e.target.closest(".act-more")) { state.open.get(loc).limit += PAGE; loadMarket(loc); return; }
+  const row = e.target.closest("tr.row");
+  if (row) { toggleApps(row, loc); return; }
+  if (e.target.closest(".market-head")) toggleMarket(loc);
+});
+$("#markets").addEventListener("input", (e) => {
+  if (!e.target.classList.contains("market-q")) return;
+  const loc = e.target.closest(".market").dataset.loc;
+  const st = state.open.get(loc);
+  st.q = e.target.value;
+  st.limit = PAGE;
+  st.focus = true;
+  clearTimeout(st.timer);
+  st.timer = setTimeout(() => loadMarket(loc), 250);
+});
 
 (async function init() {
   state.meta = await api("/api/meta");
-  await loadApps();
-  pollRun();
+  for (const loc of storageGet("open") || []) {
+    if (marketOf(loc)) state.open.set(loc, { q: "", limit: PAGE, data: null });
+  }
+  state.overview = await api("/api/markets");
+  renderTiles();
+  renderMarkets();
+  for (const loc of state.open.keys()) loadMarket(loc);
+  pollScan();
 })().catch((e) => toast(e.message));

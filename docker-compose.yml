@@ -3,11 +3,8 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
-    environment:
-      ASC_PRIVATE_KEY_PATH: /secrets/AuthKey.p8
     volumes:
       - ./data:/data
-      - ./secrets:/secrets:ro
     ports:
       # Only reachable locally (or via SSH tunnel) unless the caddy profile is on.
       - "127.0.0.1:${APP_PORT:-8000}:8000"

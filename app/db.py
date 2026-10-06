@@ -9,49 +9,48 @@ from datetime import datetime, timezone
 
 DB_PATH = os.environ.get("DB_PATH", "data/aso.db")
 
+SCHEMA_VERSION = 3
+
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS apps (
-    id          INTEGER PRIMARY KEY,          -- App Store (Apple) ID
-    name        TEXT NOT NULL,
-    bundle_id   TEXT,
-    icon        TEXT,
-    seller      TEXT,
-    created_at  TEXT NOT NULL
+-- One scan = one pass over all (or some) markets.
+CREATE TABLE IF NOT EXISTS scans (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at   TEXT NOT NULL,
+    finished_at  TEXT,
+    status       TEXT NOT NULL,               -- running | done | failed
+    partial      INTEGER NOT NULL DEFAULT 0,  -- 1 = only some markets
+    total        INTEGER NOT NULL DEFAULT 0,  -- prefixes planned (estimate)
+    done         INTEGER NOT NULL DEFAULT 0,  -- prefixes probed
+    current      TEXT,                        -- market being scanned
+    error        TEXT
 );
 
+-- Result of probing one scan unit (storefront + alphabets).
+CREATE TABLE IF NOT EXISTS market_scans (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id      INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    scan_key     TEXT NOT NULL,
+    scanned_at   TEXT NOT NULL,
+    prefixes     INTEGER NOT NULL,
+    unique_terms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_market_scans_key ON market_scans(scan_key, id DESC);
+
+-- Top suggestions of a market scan, ranked by popularity score.
 CREATE TABLE IF NOT EXISTS keywords (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    app_id      INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-    country     TEXT NOT NULL,
-    term        TEXT NOT NULL,
-    locale      TEXT,
-    source      TEXT NOT NULL DEFAULT 'manual',
-    created_at  TEXT NOT NULL,
-    UNIQUE (app_id, country, term)
+    market_scan_id INTEGER NOT NULL REFERENCES market_scans(id) ON DELETE CASCADE,
+    term           TEXT NOT NULL,
+    rank           INTEGER NOT NULL,
+    score          REAL NOT NULL,             -- 0..100, top term of the market = 100
+    hits           INTEGER NOT NULL,          -- how many prefixes suggested it
+    best_prefix    TEXT NOT NULL,             -- shortest prefix that surfaced it
+    best_pos       INTEGER NOT NULL,          -- its position there (1-based)
+    PRIMARY KEY (market_scan_id, term)
 );
-
-CREATE TABLE IF NOT EXISTS checks (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    keyword_id    INTEGER NOT NULL REFERENCES keywords(id) ON DELETE CASCADE,
-    run_id        INTEGER,
-    checked_at    TEXT NOT NULL,
-    rank          INTEGER,                    -- NULL = not in top results
-    total_results INTEGER NOT NULL,
-    top_apps      TEXT                        -- JSON: [{id, name, icon}] top 3
-);
-CREATE INDEX IF NOT EXISTS idx_checks_kw ON checks(keyword_id, checked_at DESC);
-
-CREATE TABLE IF NOT EXISTS runs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    app_id      INTEGER,                      -- NULL = all apps
-    started_at  TEXT NOT NULL,
-    finished_at TEXT,
-    status      TEXT NOT NULL,                -- running | done | failed
-    total       INTEGER NOT NULL DEFAULT 0,
-    done        INTEGER NOT NULL DEFAULT 0,
-    error       TEXT
-);
+CREATE INDEX IF NOT EXISTS idx_keywords_term ON keywords(term);
 """
+
+LEGACY_TABLES = ["checks", "market_meta", "keywords", "apps", "runs"]
 
 
 def now() -> str:
@@ -79,28 +78,16 @@ def tx():
 def init() -> None:
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     with tx() as conn:
+        if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+            # Versions < 3 tracked individual apps; that data model is gone.
+            conn.execute("PRAGMA foreign_keys = OFF")
+            for t in LEGACY_TABLES:
+                conn.execute(f"DROP TABLE IF EXISTS {t}")
+            conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(SCHEMA)
-        # A crash mid-run leaves it "running" forever; close it on boot.
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        # A crash mid-scan leaves it "running" forever; close it on boot.
         conn.execute(
-            "UPDATE runs SET status='failed', error='interrupted', finished_at=? WHERE status='running'",
+            "UPDATE scans SET status='failed', error='interrupted', finished_at=? WHERE status='running'",
             (now(),),
         )
-
-
-# Latest and previous check per keyword, in one query.
-KEYWORDS_WITH_RANKS = """
-WITH ranked AS (
-    SELECT c.*, ROW_NUMBER() OVER (PARTITION BY keyword_id ORDER BY c.checked_at DESC, c.id DESC) AS rn
-    FROM checks c
-    JOIN keywords k ON k.id = c.keyword_id
-    WHERE k.app_id = :app_id
-)
-SELECT k.id, k.country, k.term, k.locale, k.source,
-       cur.rank AS rank, cur.checked_at AS checked_at, cur.total_results AS total_results,
-       cur.top_apps AS top_apps, prev.rank AS prev_rank, prev.checked_at AS prev_checked_at
-FROM keywords k
-LEFT JOIN ranked cur  ON cur.keyword_id  = k.id AND cur.rn = 1
-LEFT JOIN ranked prev ON prev.keyword_id = k.id AND prev.rn = 2
-WHERE k.app_id = :app_id
-ORDER BY k.country, COALESCE(cur.rank, 100000), k.term
-"""

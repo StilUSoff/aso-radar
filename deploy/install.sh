@@ -28,9 +28,8 @@ if [ ! -f .env ]; then
 fi
 
 # The container runs as uid 1000.
-mkdir -p data secrets
-chown -R 1000:1000 data secrets
-chmod 700 secrets
+mkdir -p data
+chown -R 1000:1000 data
 
 if [ -n "${SUDO_USER:-}" ]; then
   usermod -aG docker "$SUDO_USER"
