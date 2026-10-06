@@ -1,0 +1,32 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ASC_PRIVATE_KEY_PATH: /secrets/AuthKey.p8
+    volumes:
+      - ./data:/data
+      - ./secrets:/secrets:ro
+    ports:
+      # Only reachable locally (or via SSH tunnel) unless the caddy profile is on.
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+
+  # HTTPS reverse proxy with automatic Let's Encrypt certificate.
+  # Enable with: docker compose --profile https up -d   (requires DOMAIN in .env)
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["https"]
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - app
+
+volumes:
+  caddy_data:

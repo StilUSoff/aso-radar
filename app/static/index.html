@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ASO Radar</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">ASO&nbsp;Radar</div>
+  <select id="appSelect" aria-label="Приложение"></select>
+  <button id="addAppBtn" class="ghost">+ Приложение</button>
+  <div class="spacer"></div>
+  <span id="runStatus" class="muted"></span>
+  <button id="runBtn">Проверить позиции</button>
+</header>
+
+<main id="main">
+  <section id="empty" class="empty hidden">
+    <h2>Добавьте приложение</h2>
+    <p class="muted">Укажите App Store ID или ссылку apps.apple.com — затем добавьте ключевые слова или импортируйте их из App Store Connect.</p>
+    <button id="emptyAddBtn">+ Добавить приложение</button>
+  </section>
+
+  <section id="dashboard" class="hidden">
+    <div class="app-head">
+      <img id="appIcon" alt="">
+      <div>
+        <h1 id="appName"></h1>
+        <div id="appMeta" class="muted"></div>
+      </div>
+      <div class="spacer"></div>
+      <button id="addKwBtn" class="ghost">+ Ключевые слова</button>
+      <button id="importBtn" class="ghost">Импорт из ASC</button>
+      <a id="exportBtn" class="btn ghost" href="#">CSV</a>
+      <button id="deleteAppBtn" class="ghost danger" title="Удалить приложение">✕</button>
+    </div>
+
+    <div class="cards" id="cards"></div>
+
+    <div class="grid">
+      <div class="panel">
+        <h2>По странам</h2>
+        <table class="data" id="countryTable">
+          <thead><tr><th>Страна</th><th class="num">Слов</th><th class="num">Топ‑10</th><th class="num">Топ‑50</th><th class="num">Топ‑200</th><th class="num">Лучшая</th><th>Покрытие</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Ключевые слова</h2>
+          <div class="filters">
+            <input id="search" type="search" placeholder="Поиск слова">
+            <select id="countryFilter"><option value="">Все страны</option></select>
+            <select id="rankFilter">
+              <option value="">Все</option>
+              <option value="10">Топ‑10</option>
+              <option value="50">Топ‑50</option>
+              <option value="ranked">В топ‑200</option>
+              <option value="none">Нет позиции</option>
+              <option value="up">Выросли</option>
+              <option value="down">Упали</option>
+            </select>
+          </div>
+        </div>
+        <table class="data" id="kwTable">
+          <thead><tr>
+            <th data-sort="country">Гео</th><th data-sort="term">Ключ</th>
+            <th data-sort="rank" class="num">Позиция</th><th data-sort="delta" class="num">Δ</th>
+            <th>Лидер выдачи</th><th></th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="kwEmpty" class="muted pad hidden">Нет ключевых слов под фильтр.</div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<dialog id="dlg">
+  <form method="dialog" id="dlgForm">
+    <h3 id="dlgTitle"></h3>
+    <div id="dlgBody"></div>
+    <div id="dlgError" class="error"></div>
+    <div class="actions">
+      <button value="cancel" class="ghost" formnovalidate>Отмена</button>
+      <button value="ok" id="dlgOk">OK</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

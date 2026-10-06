@@ -1,0 +1,8 @@
+.git
+.env
+data
+secrets
+deploy
+*.md
+__pycache__
+.venv
