@@ -1,4 +1,4 @@
-"""ASO Radar: top App Store search queries per market, mined from search suggestions."""
+"""ASO Radar: top App Store search queries per market, and app positions for them."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, itunes, scanner
+from . import apps_api, apptracker, db, itunes, scanner
 from .markets import MARKETS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -41,12 +41,14 @@ def auth(request: Request, creds: HTTPBasicCredentials | None = Depends(security
 
 
 app = FastAPI(title="ASO Radar", dependencies=[Depends(auth)], docs_url=None, redoc_url=None)
+app.include_router(apps_api.router)
 
 
 @app.on_event("startup")
 def startup() -> None:
     db.init()
     threading.Thread(target=scanner.scheduler_loop, daemon=True).start()
+    threading.Thread(target=apptracker.scheduler_loop, daemon=True).start()
 
 
 @app.get("/healthz")

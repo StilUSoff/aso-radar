@@ -16,6 +16,7 @@ import httpx
 
 HINTS_URL = "https://search.itunes.apple.com/WebObjects/MZSearchHints.woa/wa/hints"
 SEARCH_URL = "https://itunes.apple.com/search"
+LOOKUP_URL = "https://itunes.apple.com/lookup"
 HINTS_PER_PAGE = 10
 
 _client = httpx.Client(timeout=30, headers={"User-Agent": "AppStore/3.0 iOS/17.0 model/iPhone15,2"})
@@ -91,3 +92,9 @@ def search(term: str, country: str, limit: int = 5) -> list[dict]:
         for r in data.get("results", [])
         if "trackId" in r
     ]
+
+
+def lookup(app_id: int, country: str = "us") -> dict | None:
+    data = _get(LOOKUP_URL, _search_throttle, params={"id": app_id, "country": country}).json()
+    results = data.get("results") or []
+    return results[0] if results else None

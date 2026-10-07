@@ -9,32 +9,96 @@
 <body>
 <header class="topbar">
   <div class="brand">ASO&nbsp;Radar</div>
-  <input id="globalSearch" type="search" placeholder="Найти запрос во всех гео…" aria-label="Поиск запроса по всем рынкам">
+  <nav class="tabs" role="tablist">
+    <button class="tab" data-view="market" role="tab">Рынок</button>
+    <button class="tab" data-view="apps" role="tab">Приложения</button>
+  </nav>
   <div class="spacer"></div>
-  <span id="scanStatus" class="muted"></span>
-  <button id="scanAllBtn" class="primary">Сканировать все рынки</button>
+  <span id="status" class="muted"></span>
 </header>
 
 <main>
-  <section id="searchBox" class="box hidden">
-    <div class="section-title">Запрос по гео</div>
-    <div id="searchResults"></div>
-  </section>
-
-  <div class="section-title">Market snapshot — топ поисковых запросов по рынкам</div>
-  <section class="box">
-    <div id="tiles" class="tiles"></div>
-    <div class="legend">
-      <span><i style="background:var(--good)"></i>свежие данные</span>
-      <span><i style="background:var(--warn)"></i>сильное обновление топа (≥10 новых в топ‑100)</span>
-      <span><i style="background:var(--bad)"></i>данные устарели</span>
-      <span><i style="background:var(--faint)"></i>ещё не сканировался</span>
+  <!-- ================= Market view ================= -->
+  <div id="view-market" class="view hidden">
+    <div class="toolbar">
+      <input id="globalSearch" type="search" placeholder="Найти запрос во всех гео…" aria-label="Поиск запроса по всем рынкам">
+      <span class="spacer"></span>
+      <span id="trackHint" class="muted hidden"></span>
+      <button id="scanAllBtn" class="primary">Сканировать все рынки</button>
     </div>
-  </section>
 
-  <div class="section-title">Рынки</div>
-  <div id="markets"></div>
+    <section id="searchBox" class="box hidden">
+      <div class="section-title">Запрос по гео</div>
+      <div id="searchResults"></div>
+    </section>
+
+    <div class="section-title">Market snapshot — топ поисковых запросов по рынкам</div>
+    <section class="box">
+      <div id="marketTiles" class="tiles"></div>
+      <div class="legend">
+        <span><i style="background:var(--good)"></i>свежие данные</span>
+        <span><i style="background:var(--warn)"></i>сильное обновление топа (≥10 новых в топ‑100)</span>
+        <span><i style="background:var(--bad)"></i>данные устарели</span>
+        <span><i style="background:var(--faint)"></i>ещё не сканировался</span>
+      </div>
+    </section>
+
+    <div class="section-title">Рынки</div>
+    <div id="marketSections"></div>
+  </div>
+
+  <!-- ================= Apps view ================= -->
+  <div id="view-apps" class="view hidden">
+    <div class="toolbar">
+      <select id="appSelect" aria-label="Приложение"></select>
+      <button id="addAppBtn">+ Приложение</button>
+      <span class="spacer"></span>
+      <button id="addKwBtn" class="needs-app">+ Ключевые слова</button>
+      <a id="appCsv" class="needs-app" href="#"><button>CSV</button></a>
+      <button id="deleteAppBtn" class="needs-app" title="Удалить приложение">Удалить</button>
+      <button id="checkBtn" class="primary needs-app">Проверить позиции</button>
+    </div>
+
+    <div id="appEmpty" class="box empty hidden">
+      <p>Добавьте любое приложение по App Store ID или ссылке apps.apple.com — своё или конкурента.</p>
+      <p class="muted">Ключи можно вписать вручную или добавить кнопкой «+» из топа рынка на вкладке «Рынок».</p>
+      <button class="primary" id="emptyAddApp">+ Добавить приложение</button>
+    </div>
+
+    <div id="appContent" class="hidden">
+      <div class="app-head">
+        <img id="appIcon" alt="">
+        <div>
+          <div class="app-name" id="appName"></div>
+          <div class="muted" id="appSub"></div>
+        </div>
+      </div>
+      <div class="section-title">Locale snapshot — median position per market</div>
+      <section class="box">
+        <div id="appTiles" class="tiles"></div>
+        <div class="legend">
+          <span><i style="background:var(--good)"></i>медиана ≤25 и ранжируется ≥60% ключей</span>
+          <span><i style="background:var(--warn)"></i>средне</span>
+          <span><i style="background:var(--bad)"></i>медиана &gt;100 или ранжируется &lt;34%</span>
+          <span><i style="background:var(--faint)"></i>нет позиций / не проверялось</span>
+        </div>
+      </section>
+      <div id="appSections"></div>
+    </div>
+  </div>
 </main>
+
+<dialog id="dlg">
+  <form method="dialog" id="dlgForm">
+    <h3 id="dlgTitle"></h3>
+    <div id="dlgBody"></div>
+    <div id="dlgError" class="error"></div>
+    <div class="actions">
+      <button value="cancel" formnovalidate>Отмена</button>
+      <button value="ok" id="dlgOk" class="primary">OK</button>
+    </div>
+  </form>
+</dialog>
 
 <div id="toast" class="toast hidden"></div>
 <script src="/static/app.js"></script>
