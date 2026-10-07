@@ -95,6 +95,35 @@ async function copyText(text, label) {
   }
 }
 
+// ---------- tooltips ----------
+
+// Shown for any element with data-tip. Lives inside the open dialog when there
+// is one (dialogs sit in the top layer, above everything else on the page).
+function showTip(el) {
+  hideTip();
+  const tip = document.createElement("div");
+  tip.className = "tip";
+  tip.id = "tip";
+  tip.textContent = el.dataset.tip;
+  (el.closest("dialog") || document.body).appendChild(tip);
+  const r = el.getBoundingClientRect();
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  const left = Math.min(Math.max(8, r.left + r.width / 2 - w / 2), window.innerWidth - w - 8);
+  const top = r.bottom + 8 + h > window.innerHeight ? r.top - h - 8 : r.bottom + 8;
+  tip.style.left = `${left}px`;
+  tip.style.top = `${top}px`;
+}
+
+function hideTip() { document.getElementById("tip")?.remove(); }
+
+document.addEventListener("mouseover", (e) => {
+  const el = e.target.closest?.("[data-tip]");
+  if (el) showTip(el); else hideTip();
+});
+document.addEventListener("focusin", (e) => { if (e.target.dataset?.tip) showTip(e.target); });
+document.addEventListener("focusout", hideTip);
+document.addEventListener("scroll", hideTip, true);
+
 // ---------- small form dialog ----------
 
 function openDialog(title, bodyHtml, onOk, okLabel = "OK") {
@@ -172,6 +201,24 @@ function setDetailHead(country, title, stats, actions) {
 // Market view
 // =====================================================================
 
+const POPULARITY_HELP =
+  "Относительная популярность запроса на этом рынке по шкале 0–100. " +
+  "100 — самый популярный запрос рынка (#1). Полоса — то же значение: полная полоса = 100. " +
+  "Число справа — точное значение: 50 ищут примерно вдвое реже лидера, 10 — в 10 раз реже, 1 — в 100 раз реже. " +
+  "Оценка построена по порядку подсказок поиска App Store, абсолютных объёмов поиска Apple не публикует.";
+
+function popularityTitle(score, leader) {
+  const times = score > 0 ? 100 / score : null;
+  let ratio = "на уровне лидера";
+  if (times && times >= 1.15) {
+    const n = times < 10 ? Math.round(times * 10) / 10 : Math.round(times);
+    // "в 2,1 раза", "в 3 раза", "в 5 раз", "в 21 раз"
+    const word = Number.isInteger(n) ? plural(n, "раз", "раза", "раз") : "раза";
+    ratio = `примерно в ${String(n).replace(".", ",")} ${word} реже лидера`;
+  }
+  return `Популярность ${fmtScore(score)} из 100 — ${ratio}${leader ? ` («${leader}»)` : ""}`;
+}
+
 function tileClass(m) {
   if (!m.scanned_at) return "none";
   const ageH = (Date.now() - new Date(m.scanned_at)) / 36e5;
@@ -236,6 +283,7 @@ function renderMarketModal() {
   const shared = market.shares_with ? marketOf(market.shares_with) : null;
   const app = currentApp();
   const tracked = trackedTerms(md.loc);
+  const leader = state.overview.find((o) => o.locale === md.loc)?.leaders[0] || "";
 
   setDetailHead(market.country, market.name,
     scan ? `<b>${scan.unique_terms}</b> запросов · ${scan.prefixes} префиксов · ${fmtDate(scan.scanned_at)}` +
@@ -269,8 +317,8 @@ function renderMarketModal() {
       <td><span class="pos ${posClass(k.rank)}">#${k.rank}</span></td>
       <td>${deltaCell(k.rank, k.prev_rank, has_previous, k.is_new)}</td>
       <td>${sparkline(k.trend)}</td>
-      <td title="относительная популярность (лидер рынка = 100)"><div class="bar"><span style="width:${Math.max(1.5, Math.log10(1 + k.score * 9.99) * 50)}%"></span></div></td>
-      <td class="muted">${fmtScore(k.score)}</td>
+      <td data-tip="${esc(popularityTitle(k.score, leader))}"><div class="bar"><span style="width:${Math.min(100, Math.max(1, k.score))}%"></span></div></td>
+      <td class="muted" data-tip="${esc(popularityTitle(k.score, leader))}">${fmtScore(k.score)}</td>
       <td class="mono muted" title="кратчайший префикс и позиция в подсказках">${esc(k.best_prefix)} → ${k.best_pos}</td>
       ${app ? `<td>${trackButton(app, tracked, k.term)}</td>` : ""}
     </tr>`).join("");
@@ -282,7 +330,7 @@ function renderMarketModal() {
       ${app ? `<span class="muted">«+» — отслеживать для «${esc(app.name)}», «✓» — снять</span>` : ""}
     </div>
     <div class="table-wrap"><table class="kw">
-      <thead><tr><th>Keyword</th><th>Position</th><th>Δ</th><th>Trend</th><th colspan="2">Popularity</th><th>Prefix → pos</th>${app ? "<th></th>" : ""}</tr></thead>
+      <thead><tr><th>Keyword</th><th>Position</th><th>Δ</th><th>Trend</th><th colspan="2">Popularity <span class="hint" tabindex="0" data-tip="${esc(POPULARITY_HELP)}">?</span></th><th>Prefix → pos</th>${app ? "<th></th>" : ""}</tr></thead>
       <tbody>${rows || `<tr><td colspan="8" class="empty">Ничего не найдено</td></tr>`}</tbody>
     </table></div>
     ${items.length < total ? `<button class="more act-more">Показать ещё (${total - items.length})</button>` : ""}`;
