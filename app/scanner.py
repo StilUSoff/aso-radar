@@ -143,7 +143,7 @@ def _scan_unit(scan_id: int, unit: dict, done: int) -> int:
             [(ms_id, term, i, round(s["score"] / top * 100, 2), s["hits"], s["best"][0], s["best"][1])
              for i, (term, s) in enumerate(ranked, 1)],
         )
-    log.info("%s: %d prefixes, %d unique terms", unit["locale"], probed, len(ranked))
+    log.info("%s: %d prefixes, %d unique terms", unit["locale"], probed, len({t for t, _, _ in seen}))
     _progress(scan_id, done)
     return done
 
@@ -181,17 +181,27 @@ def rank_terms(seen: list[tuple[str, str, int]]) -> list[tuple[str, dict]]:
     return sorted(stats.items(), key=lambda kv: (-kv[1]["score"], -kv[1]["hits"], kv[0]))
 
 
+def _age_hours(conn, where: str) -> float | None:
+    row = conn.execute(f"SELECT started_at FROM scans WHERE partial = 0 AND {where} ORDER BY id DESC LIMIT 1").fetchone()
+    if not row:
+        return None
+    return (time.time() - calendar.timegm(time.strptime(row["started_at"], "%Y-%m-%dT%H:%M:%SZ"))) / 3600
+
+
 def scheduler_loop() -> None:
-    """Start a full scan whenever the last one is older than the interval."""
+    """Start a full scan when the last good one is older than the interval.
+
+    Scans cut short by a restart are redone right away; scans that failed on
+    Apple's side are retried after an hour.
+    """
     if SCAN_INTERVAL_HOURS <= 0:
         return
     while True:
         try:
             with db.tx() as conn:
-                last = conn.execute("SELECT started_at FROM scans WHERE partial = 0 ORDER BY id DESC LIMIT 1").fetchone()
-            age = time.time() - calendar.timegm(time.strptime(last["started_at"], "%Y-%m-%dT%H:%M:%SZ")) \
-                if last else None
-            if age is None or age >= SCAN_INTERVAL_HOURS * 3600:
+                ok = _age_hours(conn, "status IN ('done', 'running')")
+                failed = _age_hours(conn, "status = 'failed' AND error != 'interrupted'")
+            if (ok is None or ok >= SCAN_INTERVAL_HOURS) and (failed is None or failed >= 1):
                 log.info("scheduled scan started: %s", start())
         except ScanInProgress:
             pass
