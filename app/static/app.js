@@ -426,18 +426,20 @@ function appSection(m) {
       <div class="market-body ${open ? "" : "hidden"}">
         <form class="meta-box meta-form">
           <div class="hdr">Current metadata
-            <span class="pill">${esc(m.locale)}</span>
-            <span class="pill">App Store ${m.country.toUpperCase()}</span>
+            ${meta.version ? `<span class="pill">v${esc(meta.version)}</span>` : ""}
             ${meta.updated_at ? `<span class="pill">${fmtDate(meta.updated_at)}</span>` : ""}
+            <span class="pill">${meta.source === "asc" ? "ASC: " : ""}${esc(m.locale)}</span>
+            <span class="pill">App Store ${m.country.toUpperCase()}</span>
             <span class="spacer"></span>
             ${editing ? `<button type="submit" class="primary">Сохранить</button><button type="button" class="act-cancel">Отмена</button>`
               : `<button type="button" class="act-edit">Редактировать</button>`}
           </div>
           <dl class="meta-grid">
-            ${metaRow("Title", meta.title || (editing ? "" : meta.store_title), limits.title, "title", editing)}
-            ${metaRow("Subtitle", meta.subtitle, limits.subtitle, "subtitle", editing)}
+            ${metaRow("Title", meta.title || (editing ? meta.store_title || "" : meta.store_title), limits.title, "title", editing)}
+            ${metaRow("Subtitle", meta.subtitle || (editing ? meta.store_subtitle || "" : meta.store_subtitle), limits.subtitle, "subtitle", editing)}
             ${metaRow("Keywords", meta.keywords, limits.keywords, "keywords", editing)}
-            ${!editing && !meta.title && meta.store_title ? `<dt></dt><dd class="faint">Title взят из выдачи App Store. Subtitle и Keywords видны только владельцу — впишите их вручную, если знаете.</dd>` : ""}
+            ${!editing && meta.iap_names?.length ? `<dt>IAP names</dt><dd><div class="chips">${meta.iap_names.map((n) => `<span class="chip mono">${esc(n)}</span>`).join("")}</div></dd>` : ""}
+            ${!editing && meta.source !== "asc" && !meta.keywords ? `<dt></dt><dd class="faint">Поле Keywords скрыто в App Store — его даёт импорт из App Store Connect, либо впишите вручную.</dd>` : ""}
           </dl>
         </form>
         <div class="table-wrap"><table class="kw">
@@ -494,19 +496,110 @@ function addAppDialog() {
   }, "Добавить");
 }
 
-function addKeywordsDialog() {
+const SOURCES = {
+  market: "Топ рынка — все запросы гео из вкладки «Рынок»",
+  listing: "Из страницы приложения в App Store (без авторизации)",
+  asc: "Из App Store Connect (нужен API‑ключ владельца)",
+  manual: "Вручную",
+};
+
+function estimate(n) {
+  const min = Math.ceil(n * 3.3 / 60);
+  return `${n} ${plural(n, "ключ", "ключа", "ключей")} ≈ ${min} мин проверки`;
+}
+
+function addKeywordsDialog(source = "market") {
+  const preset = [...state.appOpen];
+  const fields = {
+    market: `
+      <label>Сколько запросов взять с каждого рынка</label>
+      <select name="top">${[50, 100, 200, 500].map((n) => `<option ${n === 100 ? "selected" : ""}>${n}</option>`).join("")}</select>
+      <label>Фильтр (необязательно) — только запросы, содержащие текст</label>
+      <input type="text" name="q" placeholder="например: dream">
+      <label>Рынки</label>${marketPicker(preset)}
+      <p class="muted">Берётся последний скан рынка в порядке популярности. Рынок должен быть уже просканирован.</p>`,
+    listing: `
+      <p class="muted">Для каждого рынка читается публичная страница приложения: Title, Subtitle и описание. Добавляются фразы из названия и запросы из топа рынка, в которых есть слова приложения. Поле Keywords в App Store скрыто — его даёт только App Store Connect.</p>
+      <label>Максимум запросов из топа на рынок</label>
+      <select name="per_market">${[20, 50, 100, 200].map((n) => `<option ${n === 50 ? "selected" : ""}>${n}</option>`).join("")}</select>
+      <label>Рынки</label>${marketPicker(preset)}`,
+    asc: `<div id="ascBox" class="muted">Загрузка…</div>`,
+    manual: `
+      <label>Ключевые слова (через запятую или с новой строки)</label>
+      <textarea name="terms" placeholder="dream journal, interprétation des rêves"></textarea>
+      <label>Рынки</label>${marketPicker(preset)}`,
+  };
+  const actions = {
+    market: async (fd) => {
+      const r = await api(`/api/apps/${state.appId}/keywords/from-market`, { method: "POST",
+        body: { locales: fd.getAll("loc"), top: Number(fd.get("top")), q: fd.get("q") || "" } });
+      return `Добавлено ${r.added}` + (r.markets_without_data.length ? `. Нет данных рынка: ${r.markets_without_data.join(", ")}` : "");
+    },
+    listing: async (fd) => {
+      const r = await api(`/api/apps/${state.appId}/keywords/from-listing`, { method: "POST",
+        body: { locales: fd.getAll("loc"), per_market: Number(fd.get("per_market")) } });
+      const missing = r.markets.filter((m) => m.error).map((m) => m.market);
+      return `Добавлено ${r.added}` + (missing.length ? `. Приложения нет в: ${missing.join(", ")}` : "");
+    },
+    asc: async (fd) => {
+      if (fd.get("key_id")) {
+        await api("/api/asc-accounts", { method: "POST", body: {
+          name: fd.get("name"), key_id: fd.get("key_id"), issuer_id: fd.get("issuer_id"), private_key: fd.get("private_key") } });
+      }
+      const r = await api(`/api/apps/${state.appId}/import-asc`, { method: "POST", body: { replace: fd.has("replace") } });
+      return `Версия ${r.version}: ${r.locales} локалей, добавлено ${r.added}` +
+        (r.skipped_locales.length ? `. Нет в списке рынков: ${r.skipped_locales.join(", ")}` : "");
+    },
+    manual: async (fd) => {
+      const r = await api(`/api/apps/${state.appId}/keywords`, { method: "POST",
+        body: { locales: fd.getAll("loc"), terms: fd.get("terms") } });
+      return `Добавлено ${r.added}`;
+    },
+  };
   openDialog("Добавить ключевые слова", `
-    <label>Ключевые слова (через запятую или с новой строки)</label>
-    <textarea name="terms" required placeholder="dream journal, interprétation des rêves"></textarea>
-    <label>Рынки</label>
-    ${marketPicker([...state.appOpen])}
-    <p class="muted">Удобнее: откройте нужный рынок на вкладке «Рынок» и жмите «+» у запросов из топа.</p>`,
+    <label>Источник</label>
+    <select name="source" id="kwSource">${Object.entries(SOURCES).map(([k, v]) =>
+      `<option value="${k}" ${k === source ? "selected" : ""}>${v}</option>`).join("")}</select>
+    <div id="kwFields">${fields[source]}</div>`,
   async (fd) => {
-    const r = await api(`/api/apps/${state.appId}/keywords`, { method: "POST",
-      body: { locales: fd.getAll("loc"), terms: fd.get("terms") } });
+    const msg = await actions[fd.get("source")](fd);
     await loadApps();
-    toast(`Добавлено ключей: ${r.added}. Запустите проверку позиций.`);
+    const total = state.appData?.total.keywords || 0;
+    toast(`${msg}. Всего ${estimate(total)} — нажмите «Проверить позиции».`);
   }, "Добавить");
+  $("#kwSource").onchange = (e) => addKeywordsDialog(e.target.value);
+  if (source === "asc") renderAscBox();
+}
+
+async function renderAscBox() {
+  const accounts = await api("/api/asc-accounts");
+  const box = $("#ascBox");
+  if (!box) return;
+  const list = accounts.map((a) => `<div>🔑 ${esc(a.name)} <span class="faint mono">${esc(a.key_id)}</span>
+    <button type="button" class="iconbtn del" data-acc="${a.id}" title="Отключить ключ">✕</button></div>`).join("");
+  box.classList.remove("muted");
+  box.innerHTML = `
+    <p class="muted">Подтягивает Title, Subtitle, скрытое поле Keywords и названия IAP каждой локализации текущей версии. Ключи из поля Keywords добавляются в отслеживание на своих рынках. Нужен ключ аккаунта разработчика, которому принадлежит приложение.</p>
+    ${list ? `<label>Подключённые ключи</label>${list}` : ""}
+    <details ${accounts.length ? "" : "open"}><summary>${accounts.length ? "Подключить ещё ключ" : "Подключить ключ App Store Connect"}</summary>
+      <p class="muted">App Store Connect → Users and Access → Integrations → Team Keys → «+», роль App Manager. Issuer ID — над списком ключей.</p>
+      <label>Название (например, имя команды)</label><input type="text" name="name">
+      <label>Key ID</label><input type="text" name="key_id" placeholder="ABC123XYZ9">
+      <label>Issuer ID</label><input type="text" name="issuer_id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+      <label>Файл .p8</label><input type="file" id="p8file" accept=".p8">
+      <textarea name="private_key" placeholder="-----BEGIN PRIVATE KEY-----…" style="min-height:70px"></textarea>
+    </details>
+    <label class="check" style="font-weight:400"><input type="checkbox" name="replace"> Заменить все текущие ключи приложения</label>`;
+  $("#p8file").onchange = async (e) => {
+    const f = e.target.files[0];
+    if (f) $("textarea[name=private_key]", box).value = await f.text();
+  };
+  box.onclick = async (e) => {
+    const del = e.target.closest("[data-acc]");
+    if (!del || !confirm("Отключить этот ключ App Store Connect?")) return;
+    await api(`/api/asc-accounts/${del.dataset.acc}`, { method: "DELETE" });
+    renderAscBox();
+  };
 }
 
 // =====================================================================
@@ -518,12 +611,17 @@ async function poll() {
     api("/api/scans/latest").catch(() => null), api("/api/app-runs/latest").catch(() => null)]);
   const scanning = scan?.status === "running";
   const checking = run?.status === "running";
-  $("#scanAllBtn").disabled = scanning;
-  $("#checkBtn").disabled = checking;
+  $("#scanAllBtn").textContent = scanning ? "Остановить скан" : "Сканировать все рынки";
+  $("#scanAllBtn").classList.toggle("danger", scanning);
+  $("#checkBtn").textContent = checking ? "Остановить проверку" : "Проверить позиции";
+  $("#checkBtn").classList.toggle("danger", checking);
   const parts = [];
   if (scanning) parts.push(`Скан рынков: ${scan.current || ""} ${scan.total ? Math.min(99, Math.round(scan.done / scan.total * 100)) : 0}%`);
   if (checking) parts.push(`Позиции: ${run.done}/${run.total} (~${Math.ceil((run.total - run.done) * 3.3 / 60)} мин)`);
-  if (!parts.length && scan?.finished_at) parts.push(`Рынки обновлены ${fmtDateTime(scan.finished_at)}`);
+  if (!parts.length && scan?.finished_at) {
+    parts.push(scan.status === "stopped" ? `Скан остановлен ${fmtDateTime(scan.finished_at)}`
+      : scan.status === "failed" ? `Скан прерван: ${scan.error}` : `Рынки обновлены ${fmtDateTime(scan.finished_at)}`);
+  }
   $("#status").textContent = parts.join(" · ");
 
   if ((scanning && scan.current !== poll.current) || (poll.scanning && !scanning)) refreshMarket();
@@ -532,7 +630,8 @@ async function poll() {
   poll.done = run?.done;
   poll.scanning = scanning;
   poll.checking = checking;
-  setTimeout(poll, scanning || checking ? 4000 : 30000);
+  clearTimeout(poll.timer);
+  poll.timer = setTimeout(poll, scanning || checking ? 4000 : 30000);
 }
 
 // =====================================================================
@@ -562,9 +661,14 @@ $("#searchResults").onclick = (e) => {
 $("#globalSearch").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(runGlobalSearch, 250); };
 $("#scanAllBtn").onclick = async () => {
   try {
-    await api("/api/scans", { method: "POST", body: {} });
-    toast("Скан всех рынков запущен — это займёт несколько часов");
-    $("#scanAllBtn").disabled = true;
+    if (poll.scanning) {
+      await api("/api/scans/stop", { method: "POST" });
+      toast("Скан останавливается — уже готовые рынки сохранены");
+    } else {
+      await api("/api/scans", { method: "POST", body: {} });
+      toast("Скан всех рынков запущен — это займёт несколько часов");
+    }
+    clearTimeout(poll.timer); poll.timer = setTimeout(poll, 800);
   } catch (e) { toast(e.message); }
 };
 $("#marketSections").addEventListener("click", async (e) => {
@@ -575,7 +679,8 @@ $("#marketSections").addEventListener("click", async (e) => {
     if (e.target.closest(".act-prompt")) { await copyText(await marketPrompt(loc), "Промпт"); return; }
     if (e.target.closest(".act-scan")) {
       await api("/api/scans", { method: "POST", body: { locales: [loc] } });
-      toast("Скан рынка запущен");
+      toast("Скан рынка запущен — остановить можно кнопкой вверху");
+      clearTimeout(poll.timer); poll.timer = setTimeout(poll, 800);
       return;
     }
     if (e.target.closest(".act-more")) { state.open.get(loc).limit += PAGE; loadMarket(loc); return; }
@@ -600,13 +705,17 @@ $("#marketSections").addEventListener("input", (e) => {
 $("#appSelect").onchange = (e) => { state.appId = Number(e.target.value); state.editing = null; loadApp(); updateTrackHint(); };
 $("#addAppBtn").onclick = addAppDialog;
 $("#emptyAddApp").onclick = addAppDialog;
-$("#addKwBtn").onclick = addKeywordsDialog;
+$("#addKwBtn").onclick = () => addKeywordsDialog();
 $("#checkBtn").onclick = async () => {
   try {
-    await api("/api/app-runs", { method: "POST", body: { app_id: state.appId } });
-    toast("Проверка позиций запущена: ~3 сек на ключ из‑за лимитов Apple");
-    $("#checkBtn").disabled = true;
-    poll.checking = true;
+    if (poll.checking) {
+      await api("/api/app-runs/stop", { method: "POST" });
+      toast("Проверка останавливается — уже полученные позиции сохранены");
+    } else {
+      await api("/api/app-runs", { method: "POST", body: { app_id: state.appId } });
+      toast(`Проверка запущена: ${estimate(state.appData?.total.keywords || 0)}`);
+    }
+    clearTimeout(poll.timer); poll.timer = setTimeout(poll, 800);
   } catch (e) { toast(e.message); }
 };
 $("#deleteAppBtn").onclick = async () => {

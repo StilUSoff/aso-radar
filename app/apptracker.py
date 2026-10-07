@@ -21,16 +21,26 @@ CHECK_INTERVAL_HOURS = float(os.environ.get("APP_CHECK_INTERVAL_HOURS", "24"))
 SEARCH_DEPTH = 200
 
 _lock = threading.Lock()
+_cancel = threading.Event()
 
 
 class RunInProgress(Exception):
     pass
 
 
+def stop() -> bool:
+    """Ask the running check to stop; positions checked so far are kept."""
+    if not _lock.locked():
+        return False
+    _cancel.set()
+    return True
+
+
 def start(app_id: int | None = None) -> int:
     """Check positions in the background; returns the run id."""
     if not _lock.acquire(blocking=False):
         raise RunInProgress()
+    _cancel.clear()
     try:
         with db.tx() as conn:
             q = "SELECT id, app_id, locale, country, term FROM app_keywords"
@@ -56,6 +66,10 @@ def _run(run_id: int, keywords: list[dict]) -> None:
 
         done = 0
         for (term, country), kws in groups.items():
+            if _cancel.is_set():
+                with db.tx() as conn:
+                    conn.execute("UPDATE app_runs SET status='stopped', finished_at=? WHERE id=?", (db.now(), run_id))
+                return
             try:
                 results = itunes.search(term, country, limit=SEARCH_DEPTH)
             except itunes.ItunesError as e:
@@ -104,6 +118,7 @@ def scheduler_loop() -> None:
             with db.tx() as conn:
                 last = conn.execute(
                     "SELECT started_at FROM app_runs WHERE app_id IS NULL AND error IS NOT 'interrupted'"
+                    " AND status != 'failed'"
                     " ORDER BY id DESC LIMIT 1"
                 ).fetchone()
                 has_keywords = conn.execute("SELECT 1 FROM app_keywords LIMIT 1").fetchone()

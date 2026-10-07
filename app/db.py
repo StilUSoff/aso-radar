@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS scans (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at   TEXT NOT NULL,
     finished_at  TEXT,
-    status       TEXT NOT NULL,               -- running | done | failed
+    status       TEXT NOT NULL,               -- running | done | stopped | failed
     partial      INTEGER NOT NULL DEFAULT 0,  -- 1 = only some markets
     total        INTEGER NOT NULL DEFAULT 0,  -- prefixes planned (estimate)
     done         INTEGER NOT NULL DEFAULT 0,  -- prefixes probed
@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS app_runs (
     app_id      INTEGER,                      -- NULL = all apps
     started_at  TEXT NOT NULL,
     finished_at TEXT,
-    status      TEXT NOT NULL,                -- running | done | failed
+    status      TEXT NOT NULL,                -- running | done | stopped | failed
     total       INTEGER NOT NULL DEFAULT 0,
     done        INTEGER NOT NULL DEFAULT 0,
     error       TEXT
@@ -92,18 +92,41 @@ CREATE TABLE IF NOT EXISTS app_checks (
 );
 CREATE INDEX IF NOT EXISTS idx_app_checks_kw ON app_checks(keyword_id, checked_at DESC);
 
--- Store listing per market: typed in by hand; store_title is seen in search results.
+-- Store listing per market. title/subtitle/keywords: from App Store Connect or
+-- typed in by hand; store_*: what the public App Store page shows.
 CREATE TABLE IF NOT EXISTS app_meta (
-    app_id      INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-    locale      TEXT NOT NULL,
-    title       TEXT,
-    subtitle    TEXT,
-    keywords    TEXT,
-    store_title TEXT,
-    updated_at  TEXT NOT NULL,
+    app_id         INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    locale         TEXT NOT NULL,
+    title          TEXT,
+    subtitle       TEXT,
+    keywords       TEXT,
+    store_title    TEXT,
+    store_subtitle TEXT,
+    iap_names      TEXT,                      -- JSON list (App Store Connect)
+    version        TEXT,                      -- app version the metadata is from
+    source         TEXT,                      -- asc | manual
+    updated_at     TEXT NOT NULL,
     PRIMARY KEY (app_id, locale)
 );
+
+-- App Store Connect API keys; one key covers all apps of a developer account.
+CREATE TABLE IF NOT EXISTS asc_accounts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    key_id      TEXT NOT NULL,
+    issuer_id   TEXT NOT NULL,
+    private_key TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
 """
+
+# Columns added after a table first shipped: (table, column, type).
+ADDED_COLUMNS = [
+    ("app_meta", "store_subtitle", "TEXT"),
+    ("app_meta", "iap_names", "TEXT"),
+    ("app_meta", "version", "TEXT"),
+    ("app_meta", "source", "TEXT"),
+]
 
 LEGACY_TABLES = ["checks", "market_meta", "keywords", "apps", "runs"]
 
@@ -140,6 +163,9 @@ def init() -> None:
                 conn.execute(f"DROP TABLE IF EXISTS {t}")
             conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(SCHEMA)
+        for table, column, kind in ADDED_COLUMNS:
+            if not conn.execute(f"SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?", (column,)).fetchone():
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         # A crash mid-scan leaves it "running" forever; close it on boot.
         for table in ("scans", "app_runs"):

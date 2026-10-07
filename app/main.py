@@ -255,6 +255,11 @@ def start_scan(body: ScanIn):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/scans/stop")
+def stop_scan():
+    return {"stopping": scanner.stop()}
+
+
 @app.get("/api/scans/latest")
 def latest_scan():
     with db.tx() as conn:

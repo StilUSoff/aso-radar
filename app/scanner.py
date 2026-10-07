@@ -32,10 +32,23 @@ FOLLOW_ESTIMATE = 7  # average continuations followed per letter (progress estim
 BRIDGE_WORDS = int(os.environ.get("BRIDGE_WORDS", "150"))
 
 _lock = threading.Lock()
+_cancel = threading.Event()
 
 
 class ScanInProgress(Exception):
     pass
+
+
+class Cancelled(Exception):
+    pass
+
+
+def stop() -> bool:
+    """Ask the running scan to stop; markets already finished are kept."""
+    if not _lock.locked():
+        return False
+    _cancel.set()
+    return True
 
 
 def estimate_prefixes(unit: dict) -> int:
@@ -56,6 +69,7 @@ def start(locales: list[str] | None = None) -> int:
         raise ValueError("No markets to scan")
     if not _lock.acquire(blocking=False):
         raise ScanInProgress()
+    _cancel.clear()
     try:
         with db.tx() as conn:
             scan_id = conn.execute(
@@ -88,6 +102,10 @@ def _run(scan_id: int, units: list[dict]) -> None:
                 "DELETE FROM scans WHERE started_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)",
                 (f"-{RETENTION_DAYS} days",),
             )
+    except Cancelled:
+        log.info("scan %s stopped", scan_id)
+        with db.tx() as conn:
+            conn.execute("UPDATE scans SET status='stopped', finished_at=? WHERE id=?", (db.now(), scan_id))
     except Exception as e:
         log.exception("scan %s failed", scan_id)
         with db.tx() as conn:
@@ -105,6 +123,8 @@ def _scan_unit(scan_id: int, unit: dict, done: int) -> int:
 
     def probe(prefix: str) -> list[str]:
         nonlocal failures
+        if _cancel.is_set():
+            raise Cancelled()
         probed.add(prefix)
         try:
             terms = itunes.hints(prefix, unit["storefront"])
@@ -185,7 +205,7 @@ def scheduler_loop() -> None:
     while True:
         try:
             with db.tx() as conn:
-                ok = _age_hours(conn, "status IN ('done', 'running')")
+                ok = _age_hours(conn, "status IN ('done', 'running', 'stopped')")
                 failed = _age_hours(conn, "status = 'failed' AND error != 'interrupted'")
             if (ok is None or ok >= SCAN_INTERVAL_HOURS) and (failed is None or failed >= 1):
                 log.info("scheduled scan started: %s", start())

@@ -140,3 +140,8 @@ dialog textarea { min-height: 130px; }
 .pick label { margin: 0; font-weight: 400; display: flex; gap: 6px; align-items: center; }
 .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .error { color: var(--bad); margin-top: 8px; min-height: 1em; }
+
+button.danger { background: var(--bad-bg); border-color: var(--bad-border); color: var(--bad); }
+details summary { cursor: pointer; margin: 10px 0 4px; color: var(--accent); }
+dialog select { width: 100%; }
+#ascBox > div { display: flex; align-items: center; gap: 8px; margin: 4px 0; }

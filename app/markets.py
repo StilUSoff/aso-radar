@@ -38,11 +38,12 @@ ALPHABETS = {
     "hanzi_trad": "台中國新蝦全街愛好手天大小高學網電遊音樂地銀行臺麥蘋時聯統富國泰玉山華國",
 }
 
-# Suggestions are probed with every letter (depth 1); depth 2 also probes every
-# two-letter combination. Scripts with big alphabets stay at depth 1.
+# Every letter is probed, then one level deeper: depth 2 probes every
+# two-letter combination, depth 1 only the continuations seen in suggestions.
+# Depth 1 needs ~2.5x fewer requests, which matters under Apple's rate limits.
 Seed = tuple  # (alphabet name, depth)
 
-LATIN_DEEP: tuple[Seed, ...] = (("latin", 2),)
+LATIN_DEEP: tuple[Seed, ...] = (("latin", 1),)
 
 
 def native(script: str, depth: int = 1, latin: bool = True) -> tuple[Seed, ...]:
@@ -70,8 +71,8 @@ _MARKETS = [
     ("ro", "Romania", "ro", 143487, LATIN_DEEP),
     ("el", "Greece", "gr", 143448, native("greek")),
     ("en-IN", "India", "in", 143467, LATIN_DEEP),
-    ("uk", "Ukraine", "ua", 143492, native("cyrillic_uk", depth=2)),
-    ("ru", "Russia", "ru", 143469, native("cyrillic_ru", depth=2)),
+    ("uk", "Ukraine", "ua", 143492, native("cyrillic_uk")),
+    ("ru", "Russia", "ru", 143469, native("cyrillic_ru")),
     ("bn-BD", "Bangladesh", "bd", 143490, native("bengali")),
     ("sk", "Slovakia", "sk", 143496, LATIN_DEEP),
     ("pt-BR", "Brazil", "br", 143503, LATIN_DEEP),

@@ -7,6 +7,7 @@ requests/minute per IP; hints tolerate much more, but we stay polite.
 from __future__ import annotations
 
 import html
+import json
 import os
 import re
 import threading
@@ -28,8 +29,12 @@ class ItunesError(Exception):
 
 
 class _Throttle:
+    """Spaces requests out; slows down when Apple answers 429, then recovers."""
+
+    MAX_DELAY = 15.0
+
     def __init__(self, delay: float):
-        self.delay = delay
+        self.base = self.delay = delay
         self.lock = threading.Lock()
         self.last = 0.0
 
@@ -40,9 +45,18 @@ class _Throttle:
                 time.sleep(pause)
             self.last = time.monotonic()
 
+    def throttled(self) -> None:
+        with self.lock:
+            self.delay = min(self.MAX_DELAY, self.delay * 2)
+
+    def ok(self) -> None:
+        with self.lock:
+            self.delay = max(self.base, self.delay * 0.98)
+
 
 _hints_throttle = _Throttle(float(os.environ.get("HINTS_REQUEST_DELAY", "0.35")))
 _search_throttle = _Throttle(float(os.environ.get("SEARCH_REQUEST_DELAY", "3.2")))
+_page_throttle = _Throttle(1.0)  # lookup API and public app pages
 
 
 def _get(url: str, throttle: _Throttle, **kwargs) -> httpx.Response:
@@ -55,12 +69,15 @@ def _get(url: str, throttle: _Throttle, **kwargs) -> httpx.Response:
             err = str(e)
         else:
             if resp.status_code == 200:
+                throttle.ok()
                 return resp
             err = f"HTTP {resp.status_code}"
             if resp.status_code not in (403, 429, 500, 502, 503, 504):
                 break
+            if resp.status_code in (403, 429):
+                throttle.throttled()
         # Throttled or transient failure: back off before retrying.
-        time.sleep(min(120, 10 * 2**attempt))
+        time.sleep(min(60, 5 * 2**attempt))
     raise ItunesError(f"{url} failed: {err}")
 
 
@@ -95,6 +112,23 @@ def search(term: str, country: str, limit: int = 5) -> list[dict]:
 
 
 def lookup(app_id: int, country: str = "us") -> dict | None:
-    data = _get(LOOKUP_URL, _search_throttle, params={"id": app_id, "country": country}).json()
+    data = _get(LOOKUP_URL, _page_throttle, params={"id": app_id, "country": country}).json()
     results = data.get("results") or []
     return results[0] if results else None
+
+
+APP_PAGE_URL = "https://apps.apple.com/{country}/app/id{app_id}"
+_SUBTITLE = re.compile(r'"subtitle":"((?:[^"\\]|\\.)*)"')
+
+
+def app_subtitle(app_id: int, country: str) -> str:
+    """Subtitle shown on the public App Store page (not in the Lookup API)."""
+    resp = _get(APP_PAGE_URL.format(country=country, app_id=app_id), _page_throttle,
+                headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)"}, follow_redirects=True)
+    m = _SUBTITLE.search(resp.text)  # the page's own app comes first, related apps later
+    if not m:
+        return ""
+    try:
+        return json.loads(f'"{m.group(1)}"')
+    except ValueError:
+        return m.group(1)

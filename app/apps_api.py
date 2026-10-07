@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import apptracker, db, itunes
+from . import apptracker, asc, db, itunes
 from .markets import MARKETS
 
 router = APIRouter(prefix="/api")
@@ -129,6 +129,9 @@ def app_markets(app_id: int):
         kws = keyword_rows(conn, app_id)
         metas = {r["locale"]: dict(r) for r in conn.execute(
             "SELECT * FROM app_meta WHERE app_id = ?", (app_id,)).fetchall()}
+        has_asc = conn.execute("SELECT 1 FROM asc_accounts LIMIT 1").fetchone() is not None
+    for m in metas.values():
+        m["iap_names"] = json.loads(m["iap_names"]) if m.get("iap_names") else []
 
     by_locale: dict[str, list[dict]] = {}
     for k in kws:
@@ -155,7 +158,7 @@ def app_markets(app_id: int):
         })
     all_ranks = [k["rank"] for k in kws if k["rank"]]
     return {
-        "app": app, "limits": LIMITS, "markets": markets,
+        "app": app, "limits": LIMITS, "markets": markets, "asc_connected": has_asc,
         "total": {"keywords": len(kws), "ranked": len(all_ranks),
                   "top50": sum(1 for r in all_ranks if r <= 50), "top10": sum(1 for r in all_ranks if r <= 10)},
     }
@@ -176,7 +179,7 @@ def save_meta(app_id: int, locale: str, body: MetaIn):
         conn.execute(
             "INSERT INTO app_meta (app_id, locale, title, subtitle, keywords, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(app_id, locale) DO UPDATE SET title=excluded.title, subtitle=excluded.subtitle,"
-            " keywords=excluded.keywords, updated_at=excluded.updated_at",
+            " keywords=excluded.keywords, source='manual', updated_at=excluded.updated_at",
             (app_id, locale, body.title.strip(), body.subtitle.strip(), body.keywords.strip(), db.now()),
         )
     return {"ok": True}
@@ -207,13 +210,249 @@ def add_keywords(app_id: int, body: KeywordsIn):
         raise HTTPException(400, "Выберите хотя бы один рынок и одно ключевое слово")
     with db.tx() as conn:
         get_app(conn, app_id)
-        before = conn.total_changes
-        conn.executemany(
-            "INSERT OR IGNORE INTO app_keywords (app_id, locale, country, term, created_at) VALUES (?, ?, ?, ?, ?)",
-            [(app_id, l, MARKETS[l]["country"], t, db.now()) for l in locales for t in terms],
-        )
-        added = conn.total_changes - before
+        added = insert_keywords(conn, app_id, [(l, t) for l in locales for t in terms])
     return {"added": added}
+
+
+def insert_keywords(conn, app_id: int, pairs) -> int:
+    """pairs: iterable of (locale, term). Returns how many were new."""
+    before = conn.total_changes
+    conn.executemany(
+        "INSERT OR IGNORE INTO app_keywords (app_id, locale, country, term, created_at) VALUES (?, ?, ?, ?, ?)",
+        [(app_id, l, MARKETS[l]["country"], t, db.now()) for l, t in pairs],
+    )
+    return conn.total_changes - before
+
+
+def latest_market_terms(conn, locale: str, top: int, q: str = "") -> list[str]:
+    """Top queries of a market's latest scan (see scanner)."""
+    row = conn.execute("SELECT id FROM market_scans WHERE scan_key = ? ORDER BY id DESC LIMIT 1",
+                       (MARKETS[locale]["scan_key"],)).fetchone()
+    if not row:
+        return []
+    sql, args = "SELECT term FROM keywords WHERE market_scan_id = ?", [row["id"]]
+    if q.strip():
+        sql += " AND term LIKE ?"
+        args.append(f"%{q.strip().lower()}%")
+    return [r["term"] for r in conn.execute(sql + " ORDER BY rank LIMIT ?", args + [top]).fetchall()]
+
+
+class FromMarketIn(BaseModel):
+    locales: list[str]
+    top: int = Field(100, ge=1, le=1000)
+    q: str = ""
+
+
+@router.post("/apps/{app_id}/keywords/from-market")
+def keywords_from_market(app_id: int, body: FromMarketIn):
+    """Track the top queries of each chosen market (optionally filtered)."""
+    locales = [l for l in body.locales if l in MARKETS]
+    if not locales:
+        raise HTTPException(400, "Выберите хотя бы один рынок")
+    with db.tx() as conn:
+        get_app(conn, app_id)
+        pairs, empty = [], []
+        for loc in locales:
+            terms = latest_market_terms(conn, loc, body.top, body.q)
+            if not terms:
+                empty.append(MARKETS[loc]["name"])
+            pairs += [(loc, t) for t in terms]
+        added = insert_keywords(conn, app_id, pairs)
+    return {"added": added, "markets_without_data": empty}
+
+
+# Words too common to say anything about an app.
+STOPWORDS = set("""
+and the for with your you app apps free new pro best from all get top our more
+de des la le les et pour avec du un une en au aux votre vos sur par
+der die das und für mit ein eine dein deine von zum zur im
+el los las y para con un una tu tus del al por en
+il lo gli e per con un una il tuo tua di da
+o os as e para com um uma seu sua do da dos das no na
+и для с в на по от к из ваш твой
+""".split())
+
+
+def listing_tokens(*texts: str) -> set[str]:
+    words = set()
+    for text in texts:
+        for w in re.split(r"[^\w]+", (text or "").lower()):
+            if len(w) >= 3 and not w.isdigit() and w not in STOPWORDS:
+                words.add(w)
+    return words
+
+
+def title_phrases(*texts: str) -> list[str]:
+    """'Dream Journal – AI Analysis' -> ['dream journal', 'ai analysis']"""
+    out = []
+    for text in texts:
+        for part in re.split(r"\s[-–—|:]\s|[,:|&•·]", (text or "").lower()):
+            part = " ".join(part.split())
+            if len(part) >= 3 and part not in out:
+                out.append(part)
+    return out
+
+
+class FromListingIn(BaseModel):
+    locales: list[str]
+    per_market: int = Field(50, ge=1, le=500)
+
+
+@router.post("/apps/{app_id}/keywords/from-listing")
+def keywords_from_listing(app_id: int, body: FromListingIn):
+    """No credentials needed: read the public App Store listing (title,
+    subtitle, description) in each market and pick that market's top queries
+    sharing its words. Saves title/subtitle as the market's store metadata."""
+    locales = [l for l in body.locales if l in MARKETS]
+    if not locales:
+        raise HTTPException(400, "Выберите хотя бы один рынок")
+    with db.tx() as conn:
+        get_app(conn, app_id)
+
+    listings: dict[str, dict | None] = {}  # per storefront country
+    added_total, report = 0, []
+    for loc in locales:
+        cc = MARKETS[loc]["country"]
+        if cc not in listings:
+            try:
+                info = itunes.lookup(app_id, cc)
+                listings[cc] = None if not info else {
+                    "title": info.get("trackName", ""),
+                    "subtitle": itunes.app_subtitle(app_id, cc),
+                    "description": info.get("description", ""),
+                }
+            except itunes.ItunesError as e:
+                raise HTTPException(502, str(e))
+        listing = listings[cc]
+        if not listing:
+            report.append({"market": MARKETS[loc]["name"], "error": "приложения нет в этой витрине"})
+            continue
+
+        # The app's own words: title and subtitle, plus words its description repeats.
+        own = listing_tokens(listing["title"], listing["subtitle"])
+        desc_words = re.split(r"[^\w]+", listing["description"].lower())
+        own |= {w for w in listing_tokens(listing["description"]) if desc_words.count(w) >= 3}
+
+        with db.tx() as conn:
+            market = latest_market_terms(conn, loc, 1000)
+            related = [t for t in market if own & listing_tokens(t)][: body.per_market]
+            terms = list(dict.fromkeys(title_phrases(listing["title"], listing["subtitle"]) + related))
+            added = insert_keywords(conn, app_id, [(loc, t) for t in terms])
+            conn.execute(
+                "INSERT INTO app_meta (app_id, locale, store_title, store_subtitle, updated_at) VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(app_id, locale) DO UPDATE SET store_title=excluded.store_title,"
+                " store_subtitle=excluded.store_subtitle",
+                (app_id, loc, listing["title"], listing["subtitle"], db.now()),
+            )
+        added_total += added
+        report.append({"market": MARKETS[loc]["name"], "added": added, "from_market": len(related),
+                       "market_scanned": bool(market)})
+    return {"added": added_total, "markets": report}
+
+
+# ---------- App Store Connect ----------
+
+class AscAccountIn(BaseModel):
+    name: str = ""
+    key_id: str
+    issuer_id: str
+    private_key: str
+
+
+def asc_client(row) -> asc.Client:
+    return asc.Client(row["key_id"], row["issuer_id"], row["private_key"])
+
+
+@router.get("/asc-accounts")
+def list_asc_accounts():
+    with db.tx() as conn:
+        rows = conn.execute("SELECT id, name, key_id, issuer_id, created_at FROM asc_accounts ORDER BY id").fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.post("/asc-accounts")
+def add_asc_account(body: AscAccountIn):
+    if "PRIVATE KEY" not in body.private_key:
+        raise HTTPException(400, "Вставьте содержимое .p8 файла целиком, вместе со строками BEGIN/END PRIVATE KEY")
+    client = asc.Client(body.key_id, body.issuer_id, body.private_key)
+    try:
+        apps = client.list_apps()  # proves the key works
+    except asc.AscError as e:
+        raise HTTPException(400, str(e))
+    with db.tx() as conn:
+        acc_id = conn.execute(
+            "INSERT INTO asc_accounts (name, key_id, issuer_id, private_key, created_at) VALUES (?, ?, ?, ?, ?)",
+            (body.name.strip() or body.key_id.strip(), body.key_id.strip(), body.issuer_id.strip(),
+             body.private_key.strip(), db.now()),
+        ).lastrowid
+    return {"id": acc_id, "apps": apps}
+
+
+@router.delete("/asc-accounts/{account_id}")
+def delete_asc_account(account_id: int):
+    with db.tx() as conn:
+        conn.execute("DELETE FROM asc_accounts WHERE id = ?", (account_id,))
+    return {"ok": True}
+
+
+@router.get("/asc-accounts/apps")
+def asc_apps():
+    """Apps visible to every connected account, to add them in one click."""
+    with db.tx() as conn:
+        rows = conn.execute("SELECT * FROM asc_accounts").fetchall()
+    out = []
+    for row in rows:
+        try:
+            out += [{**a, "account": row["name"]} for a in asc_client(row).list_apps()]
+        except asc.AscError as e:
+            out.append({"account": row["name"], "error": str(e)})
+    return out
+
+
+class AscImportIn(BaseModel):
+    replace: bool = False
+
+
+@router.post("/apps/{app_id}/import-asc")
+def import_asc(app_id: int, body: AscImportIn):
+    """Title, subtitle, the hidden Keywords field and IAP names of every
+    localization; the Keywords become tracked queries in their markets."""
+    with db.tx() as conn:
+        get_app(conn, app_id)
+        accounts = conn.execute("SELECT * FROM asc_accounts").fetchall()
+    if not accounts:
+        raise HTTPException(400, "Не подключён ни один ключ App Store Connect")
+    client = next((asc_client(a) for a in accounts if asc_client(a).has_app(app_id)), None)
+    if not client:
+        raise HTTPException(404, "Ни один подключённый ключ не видит это приложение")
+    try:
+        data = client.fetch_metadata(app_id)
+    except asc.AscError as e:
+        raise HTTPException(400, str(e))
+
+    pairs, skipped = [], []
+    with db.tx() as conn:
+        for loc, m in data["locales"].items():
+            if loc not in MARKETS:
+                skipped.append(loc)
+                continue
+            pairs += [(loc, " ".join(w.split()).lower()) for w in (m.get("keywords") or "").split(",") if w.strip()]
+            pairs += [(loc, p) for p in title_phrases(m.get("title", ""), m.get("subtitle", ""))]
+            conn.execute(
+                "INSERT INTO app_meta (app_id, locale, title, subtitle, keywords, iap_names, version, source, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, 'asc', ?)"
+                " ON CONFLICT(app_id, locale) DO UPDATE SET title=excluded.title, subtitle=excluded.subtitle,"
+                " keywords=excluded.keywords, iap_names=excluded.iap_names, version=excluded.version,"
+                " source='asc', updated_at=excluded.updated_at",
+                (app_id, loc, m.get("title", ""), m.get("subtitle", ""), m.get("keywords", ""),
+                 json.dumps(m.get("iap_names", []), ensure_ascii=False), data["version"],
+                 data["date"] or db.now()),
+            )
+        if body.replace:
+            conn.execute("DELETE FROM app_keywords WHERE app_id = ?", (app_id,))
+        added = insert_keywords(conn, app_id, pairs)
+    return {"version": data["version"], "locales": len(data["locales"]) - len(skipped),
+            "added": added, "skipped_locales": skipped}
 
 
 @router.delete("/app-keywords/{keyword_id}")
@@ -251,6 +490,11 @@ def start_run(body: RunIn):
         return {"run_id": apptracker.start(body.app_id)}
     except apptracker.RunInProgress:
         raise HTTPException(409, "Проверка позиций уже идёт")
+
+
+@router.post("/app-runs/stop")
+def stop_run():
+    return {"stopping": apptracker.stop()}
 
 
 @router.get("/app-runs/latest")
