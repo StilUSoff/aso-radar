@@ -175,7 +175,7 @@ function setDetailHead(country, title, stats, actions) {
 function tileClass(m) {
   if (!m.scanned_at) return "none";
   const ageH = (Date.now() - new Date(m.scanned_at)) / 36e5;
-  if (state.meta.scan_interval_hours > 0 && ageH > state.meta.scan_interval_hours * 2 + 6) return "stale";
+  if (state.meta.schedule_days > 0 && ageH > state.meta.schedule_days * 24 * 1.5 + 6) return "stale";
   return m.new >= 10 ? "hot" : "";
 }
 
@@ -798,6 +798,7 @@ $("#detail").addEventListener("submit", async (e) => {
 
 (async function init() {
   state.meta = await api("/api/meta");
+  $("#scheduleInfo").textContent = `Автообновление ${state.meta.schedule}`;
   setView(storageGet("view") === "apps" ? "apps" : "market");
   state.overview = await api("/api/markets");
   renderMarketTiles();

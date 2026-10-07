@@ -6,14 +6,13 @@ apps of that storefront; the app's place in that list is its position.
 
 from __future__ import annotations
 
-import calendar
 import json
 import logging
 import os
 import threading
 import time
 
-from . import db, itunes
+from . import db, itunes, schedule
 
 log = logging.getLogger("aso.apps")
 
@@ -132,21 +131,21 @@ def _search_waiting_out_limits(run_id: int, term: str, country: str) -> list[dic
 
 
 def scheduler_loop() -> None:
-    """Re-check all apps when the last full run is older than the interval."""
-    if CHECK_INTERVAL_HOURS <= 0:
+    """Re-check all apps on schedule (see schedule.py); resume interrupted runs."""
+    if not schedule.enabled(CHECK_INTERVAL_HOURS):
         return
     while True:
         try:
             with db.tx() as conn:
-                last = conn.execute(
-                    "SELECT started_at FROM app_runs WHERE app_id IS NULL AND error IS NOT 'interrupted'"
-                    " AND status != 'failed'"
-                    " ORDER BY id DESC LIMIT 1"
-                ).fetchone()
+                latest = conn.execute(
+                    "SELECT status, error FROM app_runs WHERE app_id IS NULL ORDER BY id DESC LIMIT 1").fetchone()
+                counted = conn.execute(
+                    "SELECT started_at FROM app_runs WHERE app_id IS NULL AND status IN ('done', 'running', 'stopped')"
+                    " ORDER BY id DESC LIMIT 1").fetchone()
                 has_keywords = conn.execute("SELECT 1 FROM app_keywords LIMIT 1").fetchone()
-            age = time.time() - calendar.timegm(time.strptime(last["started_at"], "%Y-%m-%dT%H:%M:%SZ")) \
-                if last else None
-            if has_keywords and (age is None or age >= CHECK_INTERVAL_HOURS * 3600):
+            interrupted = latest and latest["status"] == "failed" and latest["error"] == "interrupted"
+            if has_keywords and (interrupted or schedule.is_due(counted["started_at"] if counted else None,
+                                                                CHECK_INTERVAL_HOURS)):
                 log.info("scheduled app check started: %s", start())
         except RunInProgress:
             pass

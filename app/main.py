@@ -17,7 +17,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import apps_api, apptracker, db, itunes, scanner
+from . import apps_api, apptracker, db, itunes, scanner, schedule
 from .markets import MARKETS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -95,6 +95,8 @@ def meta():
     return {
         "markets": [public(m) for m in MARKETS.values()],
         "scan_interval_hours": scanner.SCAN_INTERVAL_HOURS,
+        "schedule": schedule.describe(scanner.SCAN_INTERVAL_HOURS),
+        "schedule_days": 7 if schedule.WEEKDAYS else scanner.SCAN_INTERVAL_HOURS / 24,
         "hints_per_hour": itunes.HINTS_PER_HOUR,
         "top_n": scanner.TOP_N,
     }

@@ -20,7 +20,7 @@ import os
 import threading
 import time
 
-from . import db, itunes, ranking
+from . import db, itunes, ranking, schedule
 from .markets import ALPHABETS, MARKETS, scan_units
 
 log = logging.getLogger("aso.scanner")
@@ -209,27 +209,30 @@ def _hints_waiting_out_limits(scan_id: int, prefix: str, storefront: int) -> lis
                 raise Cancelled()
 
 
-def _age_hours(conn, where: str) -> float | None:
-    row = conn.execute(f"SELECT started_at FROM scans WHERE partial = 0 AND {where} ORDER BY id DESC LIMIT 1").fetchone()
-    if not row:
-        return None
-    return (time.time() - calendar.timegm(time.strptime(row["started_at"], "%Y-%m-%dT%H:%M:%SZ"))) / 3600
-
-
 def scheduler_loop() -> None:
-    """Start a full scan when the last good one is older than the interval.
+    """Start full scans on schedule (see schedule.py).
 
-    Scans cut short by a restart are redone right away; scans that failed on
-    Apple's side are retried after an hour.
+    A scan cut short by a restart is resumed right away (stalest markets go
+    first, so finished ones are not redone); a scan that failed on Apple's
+    side is retried after an hour; one stopped by hand waits for the next slot.
     """
-    if SCAN_INTERVAL_HOURS <= 0:
+    if not schedule.enabled(SCAN_INTERVAL_HOURS):
         return
     while True:
         try:
             with db.tx() as conn:
-                ok = _age_hours(conn, "status IN ('done', 'running', 'stopped')")
-                failed = _age_hours(conn, "status = 'failed' AND error != 'interrupted'")
-            if (ok is None or ok >= SCAN_INTERVAL_HOURS) and (failed is None or failed >= 1):
+                latest = conn.execute(
+                    "SELECT status, error, started_at, finished_at FROM scans WHERE partial = 0"
+                    " ORDER BY id DESC LIMIT 1").fetchone()
+                counted = conn.execute(
+                    "SELECT started_at FROM scans WHERE partial = 0 AND status IN ('done', 'running', 'stopped')"
+                    " ORDER BY id DESC LIMIT 1").fetchone()
+            if latest and latest["status"] == "failed" and latest["error"] == "interrupted":
+                log.info("resuming interrupted scan: %s", start())
+            elif latest and latest["status"] == "failed" and \
+                    time.time() - calendar.timegm(time.strptime(latest["finished_at"], "%Y-%m-%dT%H:%M:%SZ")) < 3600:
+                pass  # back off after a failure
+            elif schedule.is_due(counted["started_at"] if counted else None, SCAN_INTERVAL_HOURS):
                 log.info("scheduled scan started: %s", start())
         except ScanInProgress:
             pass

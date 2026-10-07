@@ -3,3 +3,4 @@ uvicorn[standard]==0.34.0
 httpx==0.28.1
 PyJWT[crypto]==2.10.1
 numpy==2.0.2
+tzdata==2025.2
