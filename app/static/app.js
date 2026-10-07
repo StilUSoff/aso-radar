@@ -215,11 +215,19 @@ function seedText(seeds) {
   return seeds.map((s) => `${s.alphabet}${s.depth === 2 ? " ×2" : " +"}`).join(" · ");
 }
 
+// term -> app keyword id, for the selected app in a market
 function trackedTerms(loc) {
   const d = state.appData;
-  if (!d || d.app.id !== state.appId) return new Set();
+  if (!d || d.app.id !== state.appId) return new Map();
   const m = d.markets.find((x) => x.locale === loc);
-  return new Set(m ? m.items.map((k) => k.term) : []);
+  return new Map(m ? m.items.map((k) => [k.term, k.id]) : []);
+}
+
+function trackButton(app, tracked, term) {
+  const id = tracked.get(term);
+  return id
+    ? `<button class="iconbtn track done" data-kw="${id}" title="Снять отслеживание для «${esc(app.name)}»"><span class="on">✓</span><span class="off">✕</span></button>`
+    : `<button class="iconbtn track" title="Отслеживать позицию «${esc(app.name)}» по этому запросу">+</button>`;
 }
 
 function renderMarketModal() {
@@ -264,14 +272,14 @@ function renderMarketModal() {
       <td title="относительная популярность (лидер рынка = 100)"><div class="bar"><span style="width:${Math.max(1.5, Math.log10(1 + k.score * 9.99) * 50)}%"></span></div></td>
       <td class="muted">${fmtScore(k.score)}</td>
       <td class="mono muted" title="кратчайший префикс и позиция в подсказках">${esc(k.best_prefix)} → ${k.best_pos}</td>
-      ${app ? `<td><button class="iconbtn track ${tracked.has(k.term) ? "done" : ""}" title="${tracked.has(k.term) ? "уже отслеживается" : `отслеживать позицию «${esc(app.name)}» по этому запросу`}">${tracked.has(k.term) ? "✓" : "+"}</button></td>` : ""}
+      ${app ? `<td>${trackButton(app, tracked, k.term)}</td>` : ""}
     </tr>`).join("");
 
   $("#detailBody").innerHTML = info + `
     <div class="toolbar">
       <input type="search" class="market-q" placeholder="Фильтр запросов" value="${esc(md.q)}">
       <span class="muted">${total} ${plural(total, "запрос", "запроса", "запросов")}</span>
-      ${app ? `<span class="muted">«+» — отслеживать для «${esc(app.name)}»</span>` : ""}
+      ${app ? `<span class="muted">«+» — отслеживать для «${esc(app.name)}», «✓» — снять</span>` : ""}
     </div>
     <div class="table-wrap"><table class="kw">
       <thead><tr><th>Keyword</th><th>Position</th><th>Δ</th><th>Trend</th><th colspan="2">Popularity</th><th>Prefix → pos</th>${app ? "<th></th>" : ""}</tr></thead>
@@ -339,16 +347,25 @@ async function refreshMarket() {
   if (state.modal?.kind === "market") loadMarketModal();
 }
 
-async function trackFromMarket(btn) {
+async function toggleTrack(btn) {
   const app = currentApp();
-  if (!app || btn.classList.contains("done")) return;
+  if (!app || btn.disabled) return;
   const loc = state.modal.loc;
   const term = btn.closest("tr").dataset.term;
-  await api(`/api/apps/${app.id}/keywords`, { method: "POST", body: { locales: [loc], terms: term } });
-  btn.classList.add("done");
-  btn.textContent = "✓";
-  toast(`«${term}» отслеживается для ${app.name} · ${marketOf(loc).name}`);
-  loadApps(); // refresh counts and tracked sets in the background
+  btn.disabled = true;
+  try {
+    if (btn.dataset.kw) {
+      await api(`/api/app-keywords/${btn.dataset.kw}`, { method: "DELETE" });
+      toast(`«${term}» больше не отслеживается для ${app.name} · ${marketOf(loc).name}`);
+    } else {
+      await api(`/api/apps/${app.id}/keywords`, { method: "POST", body: { locales: [loc], terms: term } });
+      toast(`«${term}» отслеживается для ${app.name} · ${marketOf(loc).name}`);
+    }
+    await loadApps(); // refresh counts and the tracked set
+    btn.outerHTML = trackButton(app, trackedTerms(loc), term);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // =====================================================================
@@ -748,7 +765,7 @@ $("#detail").addEventListener("click", async (e) => {
         return;
       }
       if (e.target.closest(".act-more")) { md.limit += PAGE; loadMarketModal(); return; }
-      if (e.target.closest(".track")) { await trackFromMarket(e.target.closest(".track")); return; }
+      if (e.target.closest(".track")) { await toggleTrack(e.target.closest(".track")); return; }
       const row = e.target.closest("tr.row");
       if (row) toggleTopApps(row, marketOf(md.loc).country, 8);
       return;

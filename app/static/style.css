@@ -125,6 +125,8 @@ select { background: var(--panel); border: 1px solid var(--border); border-radiu
 .iconbtn:hover { color: var(--text); }
 .del:hover { color: var(--bad); }
 .track.done { color: var(--good); }
+.track .off, .track.done:hover .on { display: none; }
+.track.done:hover .off { display: inline; color: var(--bad); }
 .needs-app.disabled { opacity: .4; pointer-events: none; }
 
 /* ---- dialog ---- */
