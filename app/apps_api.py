@@ -41,7 +41,17 @@ def get_app(conn, app_id: int):
 
 class AppIn(BaseModel):
     app: str = Field(..., description="App Store ID or apps.apple.com URL")
-    country: str = "us"
+    locales: list[str] = Field(..., description="Markets to track the app in")
+
+
+class AppMarketsIn(BaseModel):
+    locales: list[str]
+
+
+def app_dict(row) -> dict:
+    d = dict(row)
+    d["markets"] = json.loads(d["markets"]) if d.get("markets") else []
+    return d
 
 
 @router.get("/apps")
@@ -51,7 +61,7 @@ def list_apps():
             "SELECT a.*, (SELECT COUNT(*) FROM app_keywords k WHERE k.app_id = a.id) AS keyword_count"
             " FROM apps a ORDER BY a.name"
         ).fetchall()
-    return [dict(r) for r in rows]
+    return [app_dict(r) for r in rows]
 
 
 @router.post("/apps")
@@ -60,22 +70,40 @@ def add_app(body: AppIn):
     if not m:
         raise HTTPException(400, "Укажите App Store ID или ссылку apps.apple.com")
     app_id = int(m.group(1))
+    locales = [l for l in body.locales if l in MARKETS]
+    if not locales:
+        raise HTTPException(400, "Выберите хотя бы одно гео")
+    # Look the app up in the storefront from the link, else in the chosen ones.
     url_country = re.search(r"apps\.apple\.com/([a-z]{2})/", body.app)
-    country = (url_country.group(1) if url_country else body.country).lower()
+    countries = list(dict.fromkeys(([url_country.group(1)] if url_country else [])
+                                   + [MARKETS[l]["country"] for l in locales] + ["us"]))
+    info = None
     try:
-        info = itunes.lookup(app_id, country)
+        for cc in countries:
+            info = itunes.lookup(app_id, cc)
+            if info:
+                break
     except itunes.ItunesError as e:
         raise HTTPException(502, str(e))
     if not info:
-        raise HTTPException(404, f"Приложение {app_id} не найдено в витрине '{country}'")
+        raise HTTPException(404, f"Приложение {app_id} не найдено в выбранных витринах")
     with db.tx() as conn:
         conn.execute(
-            "INSERT INTO apps (id, name, bundle_id, icon, seller, created_at) VALUES (?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon",
+            "INSERT INTO apps (id, name, bundle_id, icon, seller, markets, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon, markets=excluded.markets",
             (app_id, info.get("trackName", str(app_id)), info.get("bundleId"),
-             info.get("artworkUrl100"), info.get("sellerName"), db.now()),
+             info.get("artworkUrl100"), info.get("sellerName"), json.dumps(locales), db.now()),
         )
-        return dict(get_app(conn, app_id))
+        return app_dict(get_app(conn, app_id))
+
+
+@router.put("/apps/{app_id}/markets")
+def set_app_markets(app_id: int, body: AppMarketsIn):
+    locales = [l for l in body.locales if l in MARKETS]
+    with db.tx() as conn:
+        get_app(conn, app_id)
+        conn.execute("UPDATE apps SET markets = ? WHERE id = ?", (json.dumps(locales), app_id))
+    return {"ok": True}
 
 
 @router.delete("/apps/{app_id}")
@@ -125,7 +153,7 @@ def grade(median: float | None, ranked: int, total: int) -> str:
 @router.get("/apps/{app_id}/markets")
 def app_markets(app_id: int):
     with db.tx() as conn:
-        app = dict(get_app(conn, app_id))
+        app = app_dict(get_app(conn, app_id))
         kws = keyword_rows(conn, app_id)
         metas = {r["locale"]: dict(r) for r in conn.execute(
             "SELECT * FROM app_meta WHERE app_id = ?", (app_id,)).fetchall()}
@@ -139,8 +167,8 @@ def app_markets(app_id: int):
 
     markets = []
     for loc, m in MARKETS.items():
-        items = by_locale.get(loc)
-        if not items:
+        items = by_locale.get(loc, [])
+        if not items and loc not in app["markets"]:
             continue
         items.sort(key=lambda k: (k["rank"] or 100000, k["term"]))
         ranked = [k for k in items if k["rank"]]

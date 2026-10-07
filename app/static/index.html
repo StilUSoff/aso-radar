@@ -43,35 +43,22 @@
       </div>
     </section>
 
-    <div class="section-title">Рынки</div>
-    <div id="marketSections"></div>
   </div>
 
   <!-- ================= Apps view ================= -->
   <div id="view-apps" class="view hidden">
-    <div class="toolbar">
-      <select id="appSelect" aria-label="Приложение"></select>
-      <button id="addAppBtn">+ Приложение</button>
-      <span class="spacer"></span>
-      <button id="addKwBtn" class="needs-app">+ Ключевые слова</button>
-      <a id="appCsv" class="needs-app" href="#"><button>CSV</button></a>
-      <button id="deleteAppBtn" class="needs-app" title="Удалить приложение">Удалить</button>
-      <button id="checkBtn" class="primary needs-app">Проверить позиции</button>
-    </div>
-
-    <div id="appEmpty" class="box empty hidden">
-      <p>Добавьте любое приложение по App Store ID или ссылке apps.apple.com — своё или конкурента.</p>
-      <p class="muted">Ключи можно вписать вручную или добавить кнопкой «+» из топа рынка на вкладке «Рынок».</p>
-      <button class="primary" id="emptyAddApp">+ Добавить приложение</button>
-    </div>
+    <div class="section-title">Приложения</div>
+    <div id="appTilesBar" class="tiles app-tiles"></div>
 
     <div id="appContent" class="hidden">
-      <div class="app-head">
-        <img id="appIcon" alt="">
-        <div>
-          <div class="app-name" id="appName"></div>
-          <div class="muted" id="appSub"></div>
-        </div>
+      <div class="toolbar app-toolbar">
+        <span id="appSub" class="muted"></span>
+        <span class="spacer"></span>
+        <button id="geoBtn" class="needs-app">Гео</button>
+        <button id="addKwBtn" class="needs-app">+ Ключевые слова</button>
+        <a id="appCsv" class="needs-app" href="#"><button>CSV</button></a>
+        <button id="deleteAppBtn" class="needs-app">Удалить</button>
+        <button id="checkBtn" class="primary needs-app">Проверить позиции</button>
       </div>
       <div class="section-title">Locale snapshot — median position per market</div>
       <section class="box">
@@ -83,7 +70,6 @@
           <span><i style="background:var(--faint)"></i>нет позиций / не проверялось</span>
         </div>
       </section>
-      <div id="appSections"></div>
     </div>
   </div>
 </main>
@@ -98,6 +84,17 @@
       <button value="ok" id="dlgOk" class="primary">OK</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="detail" class="detail">
+  <div class="detail-head">
+    <span class="title" id="detailTitle"></span>
+    <span class="stats" id="detailStats"></span>
+    <span class="spacer"></span>
+    <span id="detailActions" class="detail-actions"></span>
+    <button id="detailClose" class="iconbtn close" aria-label="Закрыть">✕</button>
+  </div>
+  <div id="detailBody" class="detail-body"></div>
 </dialog>
 
 <div id="toast" class="toast hidden"></div>

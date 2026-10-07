@@ -5,10 +5,9 @@ const PAGE = 100;
 const state = {
   meta: null,
   view: "market",
-  // market view
-  overview: [], open: new Map(), // locale -> {data, q, limit}
-  // apps view
-  apps: [], appId: null, appData: null, appOpen: new Set(), editing: null,
+  overview: [],                  // market tiles
+  apps: [], appId: null, appData: null,
+  modal: null,                   // {kind: "market", loc, q, limit, data} | {kind: "app", loc, editing}
 };
 
 // ---------- helpers ----------
@@ -25,6 +24,7 @@ const plural = (n, one, few, many) => {
 const marketOf = (loc) => state.meta.markets.find((m) => m.locale === loc);
 const currentApp = () => state.apps.find((a) => a.id === state.appId);
 const fmtScore = (s) => s >= 10 ? s.toFixed(0) : s >= 1 ? s.toFixed(1) : s.toFixed(2);
+const posClass = (rank) => rank <= 10 ? "p1" : rank <= 50 ? "p2" : "p3";
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -42,13 +42,11 @@ function toast(msg) {
   t.textContent = msg;
   t.classList.remove("hidden");
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => t.classList.add("hidden"), 4000);
+  toast.timer = setTimeout(() => t.classList.add("hidden"), 4500);
 }
 
 function storageGet(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
 function storageSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
-
-function posClass(rank) { return rank <= 10 ? "p1" : rank <= 50 ? "p2" : "p3"; }
 
 function deltaCell(rank, prev, hasPrev, isNew) {
   if (!hasPrev) return "";
@@ -82,7 +80,7 @@ function sparkline(trend, floor) {
 
 function appsList(apps) {
   return `<div class="apps-list">${apps.map((a, i) => `
-    <a class="app" ${a.url ? `href="${esc(a.url)}"` : `href="https://apps.apple.com/app/id${a.id}"`} target="_blank" rel="noopener">
+    <a class="app" href="${esc(a.url || `https://apps.apple.com/app/id${a.id}`)}" target="_blank" rel="noopener">
       <img src="${esc(a.icon)}" alt="" loading="lazy">
       <div><b>${i + 1}. ${esc(a.name)}</b>${a.seller ? `<small>${esc(a.seller)}</small>` : ""}</div></a>`).join("")
     || '<span class="muted">Приложений не найдено</span>'}</div>`;
@@ -97,7 +95,7 @@ async function copyText(text, label) {
   }
 }
 
-// ---------- dialog ----------
+// ---------- small form dialog ----------
 
 function openDialog(title, bodyHtml, onOk, okLabel = "OK") {
   const dlg = $("#dlg");
@@ -110,6 +108,7 @@ function openDialog(title, bodyHtml, onOk, okLabel = "OK") {
     if (e.submitter?.value !== "ok") return;
     e.preventDefault();
     $("#dlgOk").disabled = true;
+    $("#dlgError").textContent = "";
     try {
       await onOk(new FormData($("#dlgForm")));
       dlg.close();
@@ -119,12 +118,54 @@ function openDialog(title, bodyHtml, onOk, okLabel = "OK") {
       $("#dlgOk").disabled = false;
     }
   };
-  dlg.showModal();
+  if (!dlg.open) dlg.showModal();
 }
 
 function marketPicker(checked = []) {
-  return `<div class="pick">${state.meta.markets.map((m) =>
-    `<label><input type="checkbox" name="loc" value="${m.locale}" ${checked.includes(m.locale) ? "checked" : ""}>${flag(m.country)} ${esc(m.name)}</label>`).join("")}</div>`;
+  return `
+    <div class="pick-tools">
+      <button type="button" data-pick="all">Все</button>
+      <button type="button" data-pick="none">Снять</button>
+      <span class="muted pick-count"></span>
+    </div>
+    <div class="pick">${state.meta.markets.map((m) =>
+      `<label><input type="checkbox" name="loc" value="${m.locale}" ${checked.includes(m.locale) ? "checked" : ""}>${flag(m.country)} ${esc(m.name)}</label>`).join("")}</div>`;
+}
+
+function updatePickCount(root) {
+  const n = root.querySelectorAll(".pick input:checked").length;
+  const el = root.querySelector(".pick-count");
+  if (el) el.textContent = `выбрано: ${n}`;
+}
+
+$("#dlg").addEventListener("click", (e) => {
+  const tool = e.target.closest("[data-pick]");
+  if (!tool) return;
+  $("#dlg").querySelectorAll(".pick input").forEach((i) => { i.checked = tool.dataset.pick === "all"; });
+  updatePickCount($("#dlg"));
+});
+$("#dlg").addEventListener("change", () => updatePickCount($("#dlg")));
+
+// ---------- detail modal ----------
+
+function openDetail() {
+  const d = $("#detail");
+  if (!d.open) d.showModal();
+}
+
+function closeDetail() {
+  state.modal = null;
+  if ($("#detail").open) $("#detail").close();
+}
+
+$("#detail").addEventListener("close", () => { state.modal = null; });
+$("#detailClose").onclick = closeDetail;
+$("#detail").addEventListener("click", (e) => { if (e.target === $("#detail")) closeDetail(); });
+
+function setDetailHead(country, title, stats, actions) {
+  $("#detailTitle").innerHTML = `<span class="flag">${flag(country)}</span>${esc(title)}`;
+  $("#detailStats").innerHTML = stats;
+  $("#detailActions").innerHTML = actions;
 }
 
 // =====================================================================
@@ -151,32 +192,23 @@ function renderMarketTiles() {
   }).join("");
 }
 
-function marketHeadStats(m) {
-  if (!m.scanned_at) return `<span class="stats">ещё не сканировался</span>`;
-  return `<span class="stats"><b>${m.unique_terms}</b> запросов · ${m.prefixes} префиксов · ${fmtDate(m.scanned_at)}` +
-    (m.leaders[0] ? ` &nbsp; Top: <b>${esc(m.leaders[0])}</b>` : "") + `</span>`;
+async function openMarketModal(loc) {
+  state.modal = { kind: "market", loc, q: "", limit: PAGE, data: null };
+  const m = marketOf(loc);
+  setDetailHead(m.country, m.name, "Загрузка…", "");
+  $("#detailBody").innerHTML = `<div class="empty">Загрузка…</div>`;
+  openDetail();
+  await loadMarketModal();
 }
 
-function renderMarketSections() {
-  $("#marketSections").innerHTML = state.overview.map((m) => `
-    <section class="market ${state.open.has(m.locale) ? "open" : ""}" id="m-${m.locale}" data-loc="${m.locale}">
-      <div class="market-head">
-        <span class="title"><span class="flag">${flag(m.country)}</span>${esc(m.name)}</span>
-        ${marketHeadStats(m)}
-        <span class="spacer"></span>
-        <button class="act-prompt" ${m.scanned_at ? "" : "disabled"}>Copy /strategy prompt</button>
-        <span class="chev">▼</span>
-      </div>
-      <div class="market-body ${state.open.has(m.locale) ? "" : "hidden"}"></div>
-    </section>`).join("");
-  for (const loc of state.open.keys()) renderMarketBody(loc);
-}
-
-async function loadMarket(loc) {
-  const st = state.open.get(loc);
-  const params = new URLSearchParams({ limit: st.limit, q: st.q });
-  st.data = await api(`/api/markets/${encodeURIComponent(loc)}?${params}`);
-  renderMarketBody(loc);
+async function loadMarketModal() {
+  const md = state.modal;
+  if (md?.kind !== "market") return;
+  const params = new URLSearchParams({ limit: md.limit, q: md.q });
+  const data = await api(`/api/markets/${encodeURIComponent(md.loc)}?${params}`);
+  if (state.modal !== md) return; // closed or switched meanwhile
+  md.data = data;
+  renderMarketModal();
 }
 
 function seedText(seeds) {
@@ -190,15 +222,20 @@ function trackedTerms(loc) {
   return new Set(m ? m.items.map((k) => k.term) : []);
 }
 
-function renderMarketBody(loc) {
-  const sec = document.getElementById(`m-${loc}`);
-  const st = state.open.get(loc);
-  if (!sec || !st?.data) return;
-  const { market, scan, items, total, has_previous, trend_dates } = st.data;
-  const body = $(".market-body", sec);
+function renderMarketModal() {
+  const md = state.modal;
+  const { market, scan, items, total, has_previous, trend_dates } = md.data;
   const shared = market.shares_with ? marketOf(market.shares_with) : null;
   const app = currentApp();
-  const tracked = trackedTerms(loc);
+  const tracked = trackedTerms(md.loc);
+
+  setDetailHead(market.country, market.name,
+    scan ? `<b>${scan.unique_terms}</b> запросов · ${scan.prefixes} префиксов · ${fmtDate(scan.scanned_at)}` +
+      (items[0] && !md.q ? ` &nbsp; Top: <b>${esc(items[0].term)}</b>` : "") : "ещё не сканировался",
+    `<button class="act-prompt" ${scan ? "" : "disabled"}>Copy /strategy prompt</button>
+     ${scan ? `<a href="/api/markets/${encodeURIComponent(md.loc)}/export.csv"><button>CSV</button></a>` : ""}
+     <button class="act-scan">${scan ? "Пересканировать" : "Сканировать"}</button>`);
+
   const info = `
     <div class="meta-box">
       <div class="hdr">Параметры сбора
@@ -208,15 +245,13 @@ function renderMarketBody(loc) {
       </div>
       <dl class="meta-grid">
         <dt>Алфавиты</dt><dd class="mono">${esc(seedText(market.seeds))} · слова‑мосты</dd>
-        <dt>Префиксов</dt><dd>${scan ? scan.prefixes : "—"}</dd>
-        <dt>Уникальных</dt><dd>${scan ? scan.unique_terms : "—"} запросов, в рейтинге топ‑${state.meta.top_n}</dd>
         <dt>Сканов</dt><dd>${trend_dates.length ? `${trend_dates.length} (с ${fmtDate(trend_dates[0])})` : "—"}</dd>
         ${shared ? `<dt>Совпадает с</dt><dd>${esc(shared.name)}: та же витрина и тот же алфавит</dd>` : ""}
       </dl>
     </div>`;
 
   if (!scan) {
-    body.innerHTML = info + `<div class="empty">Данных нет. <button class="act-scan">Сканировать этот рынок</button></div>`;
+    $("#detailBody").innerHTML = info + `<div class="empty">Данных нет — нажмите «Сканировать».</div>`;
     return;
   }
 
@@ -227,26 +262,24 @@ function renderMarketBody(loc) {
       <td>${deltaCell(k.rank, k.prev_rank, has_previous, k.is_new)}</td>
       <td>${sparkline(k.trend)}</td>
       <td title="относительная популярность (лидер рынка = 100)"><div class="bar"><span style="width:${Math.max(1.5, Math.log10(1 + k.score * 9.99) * 50)}%"></span></div></td>
-      <td class="muted num">${fmtScore(k.score)}</td>
+      <td class="muted">${fmtScore(k.score)}</td>
       <td class="mono muted" title="кратчайший префикс и позиция в подсказках">${esc(k.best_prefix)} → ${k.best_pos}</td>
       ${app ? `<td><button class="iconbtn track ${tracked.has(k.term) ? "done" : ""}" title="${tracked.has(k.term) ? "уже отслеживается" : `отслеживать позицию «${esc(app.name)}» по этому запросу`}">${tracked.has(k.term) ? "✓" : "+"}</button></td>` : ""}
     </tr>`).join("");
 
-  body.innerHTML = info + `
+  $("#detailBody").innerHTML = info + `
     <div class="toolbar">
-      <input type="search" class="market-q" placeholder="Фильтр запросов" value="${esc(st.q)}">
+      <input type="search" class="market-q" placeholder="Фильтр запросов" value="${esc(md.q)}">
       <span class="muted">${total} ${plural(total, "запрос", "запроса", "запросов")}</span>
-      <span class="spacer"></span>
-      <a href="/api/markets/${encodeURIComponent(loc)}/export.csv"><button>CSV</button></a>
-      <button class="act-scan">Пересканировать</button>
+      ${app ? `<span class="muted">«+» — отслеживать для «${esc(app.name)}»</span>` : ""}
     </div>
     <div class="table-wrap"><table class="kw">
       <thead><tr><th>Keyword</th><th>Position</th><th>Δ</th><th>Trend</th><th colspan="2">Popularity</th><th>Prefix → pos</th>${app ? "<th></th>" : ""}</tr></thead>
       <tbody>${rows || `<tr><td colspan="8" class="empty">Ничего не найдено</td></tr>`}</tbody>
     </table></div>
     ${items.length < total ? `<button class="more act-more">Показать ещё (${total - items.length})</button>` : ""}`;
-  const input = $(".market-q", body);
-  if (st.focus) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); st.focus = false; }
+  const input = $(".market-q");
+  if (md.focus) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); md.focus = false; }
 }
 
 async function toggleTopApps(tr, country, cols) {
@@ -262,24 +295,6 @@ async function toggleTopApps(tr, country, cols) {
   } catch (e) {
     row.innerHTML = `<td colspan="${cols}" class="muted">${esc(e.message)}</td>`;
   }
-}
-
-async function toggleMarket(loc, forceOpen = false) {
-  const sec = document.getElementById(`m-${loc}`);
-  const isOpen = state.open.has(loc);
-  if (isOpen && !forceOpen) {
-    state.open.delete(loc);
-    sec.classList.remove("open");
-    $(".market-body", sec).classList.add("hidden");
-  } else if (!isOpen) {
-    state.open.set(loc, { q: "", limit: PAGE, data: null });
-    sec.classList.add("open");
-    const body = $(".market-body", sec);
-    body.classList.remove("hidden");
-    body.innerHTML = `<div class="empty">Загрузка…</div>`;
-    await loadMarket(loc);
-  }
-  storageSet("open", [...state.open.keys()]);
 }
 
 async function marketPrompt(loc) {
@@ -321,24 +336,13 @@ async function runGlobalSearch() {
 async function refreshMarket() {
   state.overview = await api("/api/markets");
   renderMarketTiles();
-  if (!$("#marketSections").children.length) { renderMarketSections(); return; }
-  for (const m of state.overview) {
-    const sec = document.getElementById(`m-${m.locale}`);
-    if (sec) $(".stats", sec).outerHTML = marketHeadStats(m);
-  }
-  for (const loc of state.open.keys()) loadMarket(loc);
+  if (state.modal?.kind === "market") loadMarketModal();
 }
 
-function updateTrackHint() {
-  const app = currentApp();
-  const el = $("#trackHint");
-  el.classList.toggle("hidden", !app);
-  if (app) el.textContent = `«+» добавляет запрос к «${app.name}»`;
-}
-
-async function trackFromMarket(btn, loc) {
+async function trackFromMarket(btn) {
   const app = currentApp();
   if (!app || btn.classList.contains("done")) return;
+  const loc = state.modal.loc;
   const term = btn.closest("tr").dataset.term;
   await api(`/api/apps/${app.id}/keywords`, { method: "POST", body: { locales: [loc], terms: term } });
   btn.classList.add("done");
@@ -357,54 +361,69 @@ async function loadApps(selectId) {
   const pick = selectId || (state.apps.some((a) => a.id === state.appId) ? state.appId
     : state.apps.some((a) => a.id === saved) ? saved : state.apps[0]?.id) || null;
   state.appId = pick;
-  $("#appSelect").innerHTML = state.apps.map((a) =>
-    `<option value="${a.id}">${esc(a.name)} (${a.keyword_count})</option>`).join("");
-  $("#appSelect").value = pick || "";
-  $("#appSelect").classList.toggle("hidden", !state.apps.length);
+  renderAppTiles();
   document.querySelectorAll(".needs-app").forEach((el) => el.classList.toggle("disabled", !pick));
-  $("#appEmpty").classList.toggle("hidden", !!state.apps.length);
-  $("#appContent").classList.toggle("hidden", !state.apps.length);
-  updateTrackHint();
+  $("#appContent").classList.toggle("hidden", !pick);
   if (pick) await loadApp(); else state.appData = null;
+}
+
+function renderAppTiles() {
+  $("#appTilesBar").innerHTML = state.apps.map((a) => `
+    <button class="tile app-tile ${a.id === state.appId ? "active" : ""}" data-app="${a.id}">
+      <img src="${esc(a.icon)}" alt="">
+      <span class="name">${esc(a.name)}</span>
+      <span class="sub">${a.keyword_count} ${plural(a.keyword_count, "ключ", "ключа", "ключей")} · ${a.markets.length} гео</span>
+    </button>`).join("") + `
+    <button class="tile app-tile add" id="addAppTile"><span class="plus">+</span><span class="name">Добавить приложение</span></button>`;
 }
 
 async function loadApp() {
   storageSet("appId", state.appId);
   state.appData = await api(`/api/apps/${state.appId}/markets`);
   renderApp();
+  if (state.modal?.kind === "app") renderAppModal();
 }
 
 function renderApp() {
   const { app, markets, total } = state.appData;
-  $("#appIcon").src = app.icon || "";
-  $("#appName").textContent = app.name;
-  $("#appSub").textContent = `ID ${app.id}${app.seller ? " · " + app.seller : ""} · ${total.keywords} ключей · ` +
+  $("#appSub").innerHTML = `<b>${esc(app.name)}</b> · ID ${app.id}${app.seller ? " · " + esc(app.seller) : ""} · ${total.keywords} ключей · ` +
     `ранжируется ${total.ranked} · в топ‑50 ${total.top50} · в топ‑10 ${total.top10}`;
   $("#appCsv").href = `/api/apps/${app.id}/export.csv`;
-
   $("#appTiles").innerHTML = markets.map((m) => `
     <button class="tile g-${m.grade}" data-loc="${m.locale}">
       <span class="name"><span class="flag">${flag(m.country)}</span>${esc(m.name)}</span>
       <span class="med">${m.median != null ? `#${m.median} <small>median</small>` : `<small>— median</small>`}</span>
       <span class="sub">ranked ${m.ranked}/${m.keywords}</span>
-    </button>`).join("") || `<div class="muted">Пока нет ключей. Нажмите «+ Ключевые слова» или добавьте их из топа на вкладке «Рынок».</div>`;
-
-  $("#appSections").innerHTML = markets.map((m) => appSection(m)).join("");
+    </button>`).join("") || `<div class="muted">Выберите гео кнопкой «Гео» и добавьте ключи.</div>`;
 }
 
 function metaRow(label, value, limit, field, editing) {
   if (editing) {
-    return `<dt>${label}</dt><dd><input type="text" name="${field}" value="${esc(value)}" maxlength="${limit * 2}" data-limit="${limit}"></dd>`;
+    return `<dt>${label}</dt><dd><input type="text" name="${field}" value="${esc(value)}" maxlength="${limit * 2}"></dd>`;
   }
   const len = [...(value || "")].length;
   return `<dt>${label}</dt><dd class="mono">${value ? esc(value) : '<span class="faint">—</span>'}${value ? `<span class="count ${len > limit ? "over" : ""}">${len}/${limit}</span>` : ""}</dd>`;
 }
 
-function appSection(m) {
-  const open = state.appOpen.has(m.locale);
+function openAppModal(loc) {
+  state.modal = { kind: "app", loc, editing: false };
+  renderAppModal();
+  openDetail();
+}
+
+function renderAppModal() {
+  const md = state.modal;
+  const m = state.appData.markets.find((x) => x.locale === md.loc);
+  if (!m) { closeDetail(); return; }
   const meta = m.meta || {};
   const limits = state.appData.limits;
-  const editing = state.editing === m.locale;
+  const editing = md.editing;
+
+  setDetailHead(m.country, m.name,
+    `${m.ranked}/${m.keywords} indexed${m.best ? ` &nbsp; Best: <b>${esc(m.best.term)} #${m.best.rank}</b>` : ""}`,
+    `<button class="act-prompt" ${m.keywords ? "" : "disabled"}>Copy /strategy prompt</button>
+     <button class="act-addkw">+ Ключи</button>`);
+
   const rows = m.items.map((k) => `
     <tr class="row" data-id="${k.id}" data-term="${esc(k.term)}">
       <td>${esc(k.term)}</td>
@@ -414,49 +433,30 @@ function appSection(m) {
       <td class="muted">${k.checked_at ? fmtDate(k.checked_at) : "—"}</td>
       <td><button class="iconbtn del" title="Удалить ключ">✕</button></td>
     </tr>`).join("");
-  return `
-    <section class="market ${open ? "open" : ""}" id="a-${m.locale}" data-loc="${m.locale}">
-      <div class="market-head">
-        <span class="title"><span class="flag">${flag(m.country)}</span>${esc(m.name)}</span>
-        <span class="stats">${m.ranked}/${m.keywords} indexed${m.best ? ` &nbsp; Best: <b>${esc(m.best.term)} #${m.best.rank}</b>` : ""}</span>
-        <span class="spacer"></span>
-        <button class="act-prompt">Copy /strategy prompt</button>
-        <span class="chev">▼</span>
-      </div>
-      <div class="market-body ${open ? "" : "hidden"}">
-        <form class="meta-box meta-form">
-          <div class="hdr">Current metadata
-            ${meta.version ? `<span class="pill">v${esc(meta.version)}</span>` : ""}
-            ${meta.updated_at ? `<span class="pill">${fmtDate(meta.updated_at)}</span>` : ""}
-            <span class="pill">${meta.source === "asc" ? "ASC: " : ""}${esc(m.locale)}</span>
-            <span class="pill">App Store ${m.country.toUpperCase()}</span>
-            <span class="spacer"></span>
-            ${editing ? `<button type="submit" class="primary">Сохранить</button><button type="button" class="act-cancel">Отмена</button>`
-              : `<button type="button" class="act-edit">Редактировать</button>`}
-          </div>
-          <dl class="meta-grid">
-            ${metaRow("Title", meta.title || (editing ? meta.store_title || "" : meta.store_title), limits.title, "title", editing)}
-            ${metaRow("Subtitle", meta.subtitle || (editing ? meta.store_subtitle || "" : meta.store_subtitle), limits.subtitle, "subtitle", editing)}
-            ${metaRow("Keywords", meta.keywords, limits.keywords, "keywords", editing)}
-            ${!editing && meta.iap_names?.length ? `<dt>IAP names</dt><dd><div class="chips">${meta.iap_names.map((n) => `<span class="chip mono">${esc(n)}</span>`).join("")}</div></dd>` : ""}
-            ${!editing && meta.source !== "asc" && !meta.keywords ? `<dt></dt><dd class="faint">Поле Keywords скрыто в App Store — его даёт импорт из App Store Connect, либо впишите вручную.</dd>` : ""}
-          </dl>
-        </form>
-        <div class="table-wrap"><table class="kw">
-          <thead><tr><th>Keyword</th><th>Position</th><th>Δ</th><th>Trend</th><th>Last</th><th></th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table></div>
-      </div>
-    </section>`;
-}
 
-function toggleAppSection(loc, forceOpen = false) {
-  if (state.appOpen.has(loc) && !forceOpen) state.appOpen.delete(loc); else state.appOpen.add(loc);
-  storageSet("appOpen", [...state.appOpen]);
-  const sec = document.getElementById(`a-${loc}`);
-  const open = state.appOpen.has(loc);
-  sec.classList.toggle("open", open);
-  $(".market-body", sec).classList.toggle("hidden", !open);
+  $("#detailBody").innerHTML = `
+    <form class="meta-box meta-form">
+      <div class="hdr">Current metadata
+        ${meta.version ? `<span class="pill">v${esc(meta.version)}</span>` : ""}
+        ${meta.updated_at ? `<span class="pill">${fmtDate(meta.updated_at)}</span>` : ""}
+        <span class="pill">${meta.source === "asc" ? "ASC: " : ""}${esc(m.locale)}</span>
+        <span class="pill">App Store ${m.country.toUpperCase()}</span>
+        <span class="spacer"></span>
+        ${editing ? `<button type="submit" class="primary">Сохранить</button><button type="button" class="act-cancel">Отмена</button>`
+          : `<button type="button" class="act-edit">Редактировать</button>`}
+      </div>
+      <dl class="meta-grid">
+        ${metaRow("Title", meta.title || meta.store_title || "", limits.title, "title", editing)}
+        ${metaRow("Subtitle", meta.subtitle || meta.store_subtitle || "", limits.subtitle, "subtitle", editing)}
+        ${metaRow("Keywords", meta.keywords, limits.keywords, "keywords", editing)}
+        ${!editing && meta.iap_names?.length ? `<dt>IAP names</dt><dd><div class="chips">${meta.iap_names.map((n) => `<span class="chip mono">${esc(n)}</span>`).join("")}</div></dd>` : ""}
+        ${!editing && meta.source !== "asc" && !meta.keywords ? `<dt></dt><dd class="faint">Поле Keywords скрыто в App Store — его даёт импорт из App Store Connect, либо впишите вручную.</dd>` : ""}
+      </dl>
+    </form>
+    ${m.items.length ? `<div class="table-wrap"><table class="kw">
+      <thead><tr><th>Keyword</th><th>Position</th><th>Δ</th><th>Trend</th><th>Last</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>` : `<div class="empty">Ключей для этого гео пока нет — нажмите «+ Ключи».</div>`}`;
 }
 
 function appPrompt(loc) {
@@ -471,7 +471,7 @@ function appPrompt(loc) {
 
 Текущие метаданные:
 Title: ${meta.title || meta.store_title || "—"}
-Subtitle: ${meta.subtitle || "—"}
+Subtitle: ${meta.subtitle || meta.store_subtitle || "—"}
 Keywords: ${meta.keywords || "—"}
 
 Позиции приложения в поиске App Store (топ‑200, ${fmtDate(m.last_checked)}):
@@ -487,13 +487,26 @@ function addAppDialog() {
   openDialog("Добавить приложение", `
     <label>App Store ID или ссылка</label>
     <input type="text" name="app" placeholder="https://apps.apple.com/fr/app/…/id1234567890" required>
-    <label>Витрина (если в ссылке нет страны)</label>
-    <input type="text" name="country" value="us" maxlength="2">`,
+    <label>Какие гео рассматривать</label>
+    ${marketPicker([])}`,
   async (fd) => {
-    const app = await api("/api/apps", { method: "POST", body: { app: fd.get("app"), country: fd.get("country") || "us" } });
+    const app = await api("/api/apps", { method: "POST", body: { app: fd.get("app"), locales: fd.getAll("loc") } });
     await loadApps(app.id);
-    toast(`Добавлено: ${app.name}`);
+    toast(`Добавлено: ${app.name}. Теперь добавьте ключи — кнопка «+ Ключевые слова».`);
   }, "Добавить");
+  updatePickCount($("#dlg"));
+}
+
+function appGeoDialog() {
+  const app = currentApp();
+  openDialog(`Гео для «${app.name}»`, `
+    <p class="muted">Плитки показываются для выбранных гео. Ключи в снятых гео не удаляются.</p>
+    ${marketPicker(app.markets)}`,
+  async (fd) => {
+    await api(`/api/apps/${app.id}/markets`, { method: "PUT", body: { locales: fd.getAll("loc") } });
+    await loadApps();
+  }, "Сохранить");
+  updatePickCount($("#dlg"));
 }
 
 const SOURCES = {
@@ -504,30 +517,30 @@ const SOURCES = {
 };
 
 function estimate(n) {
-  const min = Math.ceil(n * 3.3 / 60);
-  return `${n} ${plural(n, "ключ", "ключа", "ключей")} ≈ ${min} мин проверки`;
+  return `${n} ${plural(n, "ключ", "ключа", "ключей")} ≈ ${Math.ceil(n * 3.3 / 60)} мин проверки`;
 }
 
-function addKeywordsDialog(source = "market") {
-  const preset = [...state.appOpen];
+function addKeywordsDialog(source = "market", preset) {
+  const app = currentApp();
+  preset = preset || app.markets;
   const fields = {
     market: `
       <label>Сколько запросов взять с каждого рынка</label>
       <select name="top">${[50, 100, 200, 500].map((n) => `<option ${n === 100 ? "selected" : ""}>${n}</option>`).join("")}</select>
       <label>Фильтр (необязательно) — только запросы, содержащие текст</label>
       <input type="text" name="q" placeholder="например: dream">
-      <label>Рынки</label>${marketPicker(preset)}
+      <label>Гео</label>${marketPicker(preset)}
       <p class="muted">Берётся последний скан рынка в порядке популярности. Рынок должен быть уже просканирован.</p>`,
     listing: `
-      <p class="muted">Для каждого рынка читается публичная страница приложения: Title, Subtitle и описание. Добавляются фразы из названия и запросы из топа рынка, в которых есть слова приложения. Поле Keywords в App Store скрыто — его даёт только App Store Connect.</p>
-      <label>Максимум запросов из топа на рынок</label>
+      <p class="muted">Для каждого гео читается публичная страница приложения: Title, Subtitle и описание. Добавляются фразы из названия и запросы из топа рынка, в которых есть слова приложения. Поле Keywords в App Store скрыто — его даёт только App Store Connect.</p>
+      <label>Максимум запросов из топа на гео</label>
       <select name="per_market">${[20, 50, 100, 200].map((n) => `<option ${n === 50 ? "selected" : ""}>${n}</option>`).join("")}</select>
-      <label>Рынки</label>${marketPicker(preset)}`,
+      <label>Гео</label>${marketPicker(preset)}`,
     asc: `<div id="ascBox" class="muted">Загрузка…</div>`,
     manual: `
       <label>Ключевые слова (через запятую или с новой строки)</label>
       <textarea name="terms" placeholder="dream journal, interprétation des rêves"></textarea>
-      <label>Рынки</label>${marketPicker(preset)}`,
+      <label>Гео</label>${marketPicker(preset)}`,
   };
   const actions = {
     market: async (fd) => {
@@ -564,10 +577,10 @@ function addKeywordsDialog(source = "market") {
   async (fd) => {
     const msg = await actions[fd.get("source")](fd);
     await loadApps();
-    const total = state.appData?.total.keywords || 0;
-    toast(`${msg}. Всего ${estimate(total)} — нажмите «Проверить позиции».`);
+    toast(`${msg}. Всего ${estimate(state.appData?.total.keywords || 0)} — нажмите «Проверить позиции».`);
   }, "Добавить");
-  $("#kwSource").onchange = (e) => addKeywordsDialog(e.target.value);
+  updatePickCount($("#dlg"));
+  $("#kwSource").onchange = (e) => addKeywordsDialog(e.target.value, preset);
   if (source === "asc") renderAscBox();
 }
 
@@ -579,7 +592,7 @@ async function renderAscBox() {
     <button type="button" class="iconbtn del" data-acc="${a.id}" title="Отключить ключ">✕</button></div>`).join("");
   box.classList.remove("muted");
   box.innerHTML = `
-    <p class="muted">Подтягивает Title, Subtitle, скрытое поле Keywords и названия IAP каждой локализации текущей версии. Ключи из поля Keywords добавляются в отслеживание на своих рынках. Нужен ключ аккаунта разработчика, которому принадлежит приложение.</p>
+    <p class="muted">Подтягивает Title, Subtitle, скрытое поле Keywords и названия IAP каждой локализации текущей версии. Ключи из поля Keywords добавляются в отслеживание на своих гео. Нужен ключ аккаунта разработчика, которому принадлежит приложение.</p>
     ${list ? `<label>Подключённые ключи</label>${list}` : ""}
     <details ${accounts.length ? "" : "open"}><summary>${accounts.length ? "Подключить ещё ключ" : "Подключить ключ App Store Connect"}</summary>
       <p class="muted">App Store Connect → Users and Access → Integrations → Team Keys → «+», роль App Manager. Issuer ID — над списком ключей.</p>
@@ -634,6 +647,11 @@ async function poll() {
   poll.timer = setTimeout(poll, scanning || checking ? 4000 : 30000);
 }
 
+function pollSoon() {
+  clearTimeout(poll.timer);
+  poll.timer = setTimeout(poll, 800);
+}
+
 // =====================================================================
 // Events
 // =====================================================================
@@ -643,20 +661,17 @@ function setView(view) {
   storageSet("view", view);
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.view === view));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== `view-${view}`));
-  if (view === "market") for (const loc of state.open.keys()) renderMarketBody(loc);
 }
 document.querySelectorAll(".tab").forEach((t) => { t.onclick = () => setView(t.dataset.view); });
 
 // market view
 $("#marketTiles").onclick = (e) => {
   const tile = e.target.closest(".tile");
-  if (!tile) return;
-  toggleMarket(tile.dataset.loc, true);
-  document.getElementById(`m-${tile.dataset.loc}`).scrollIntoView({ behavior: "smooth" });
+  if (tile) openMarketModal(tile.dataset.loc);
 };
 $("#searchResults").onclick = (e) => {
   const chip = e.target.closest(".chip");
-  if (chip) $("#marketTiles").onclick({ target: $(`#marketTiles .tile[data-loc="${chip.dataset.loc}"]`) });
+  if (chip) openMarketModal(chip.dataset.loc);
 };
 $("#globalSearch").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(runGlobalSearch, 250); };
 $("#scanAllBtn").onclick = async () => {
@@ -668,43 +683,20 @@ $("#scanAllBtn").onclick = async () => {
       await api("/api/scans", { method: "POST", body: {} });
       toast("Скан всех рынков запущен — это займёт несколько часов");
     }
-    clearTimeout(poll.timer); poll.timer = setTimeout(poll, 800);
+    pollSoon();
   } catch (e) { toast(e.message); }
 };
-$("#marketSections").addEventListener("click", async (e) => {
-  const sec = e.target.closest(".market");
-  if (!sec) return;
-  const loc = sec.dataset.loc;
-  try {
-    if (e.target.closest(".act-prompt")) { await copyText(await marketPrompt(loc), "Промпт"); return; }
-    if (e.target.closest(".act-scan")) {
-      await api("/api/scans", { method: "POST", body: { locales: [loc] } });
-      toast("Скан рынка запущен — остановить можно кнопкой вверху");
-      clearTimeout(poll.timer); poll.timer = setTimeout(poll, 800);
-      return;
-    }
-    if (e.target.closest(".act-more")) { state.open.get(loc).limit += PAGE; loadMarket(loc); return; }
-    if (e.target.closest(".track")) { await trackFromMarket(e.target.closest(".track"), loc); return; }
-  } catch (err) { toast(err.message); return; }
-  const row = e.target.closest("tr.row");
-  if (row) { toggleTopApps(row, marketOf(loc).country, 8); return; }
-  if (e.target.closest(".market-head")) toggleMarket(loc);
-});
-$("#marketSections").addEventListener("input", (e) => {
-  if (!e.target.classList.contains("market-q")) return;
-  const loc = e.target.closest(".market").dataset.loc;
-  const st = state.open.get(loc);
-  st.q = e.target.value;
-  st.limit = PAGE;
-  st.focus = true;
-  clearTimeout(st.timer);
-  st.timer = setTimeout(() => loadMarket(loc), 250);
-});
 
 // apps view
-$("#appSelect").onchange = (e) => { state.appId = Number(e.target.value); state.editing = null; loadApp(); updateTrackHint(); };
-$("#addAppBtn").onclick = addAppDialog;
-$("#emptyAddApp").onclick = addAppDialog;
+$("#appTilesBar").onclick = (e) => {
+  const tile = e.target.closest(".app-tile");
+  if (!tile) return;
+  if (tile.id === "addAppTile") { addAppDialog(); return; }
+  state.appId = Number(tile.dataset.app);
+  renderAppTiles();
+  loadApp();
+};
+$("#geoBtn").onclick = appGeoDialog;
 $("#addKwBtn").onclick = () => addKeywordsDialog();
 $("#checkBtn").onclick = async () => {
   try {
@@ -715,7 +707,7 @@ $("#checkBtn").onclick = async () => {
       await api("/api/app-runs", { method: "POST", body: { app_id: state.appId } });
       toast(`Проверка запущена: ${estimate(state.appData?.total.keywords || 0)}`);
     }
-    clearTimeout(poll.timer); poll.timer = setTimeout(poll, 800);
+    pollSoon();
   } catch (e) { toast(e.message); }
 };
 $("#deleteAppBtn").onclick = async () => {
@@ -727,58 +719,76 @@ $("#deleteAppBtn").onclick = async () => {
 };
 $("#appTiles").onclick = (e) => {
   const tile = e.target.closest(".tile");
-  if (!tile) return;
-  toggleAppSection(tile.dataset.loc, true);
-  document.getElementById(`a-${tile.dataset.loc}`).scrollIntoView({ behavior: "smooth" });
+  if (tile) openAppModal(tile.dataset.loc);
 };
-$("#appSections").addEventListener("click", async (e) => {
-  const sec = e.target.closest(".market");
-  if (!sec) return;
-  const loc = sec.dataset.loc;
-  if (e.target.closest(".act-prompt")) { copyText(appPrompt(loc), "Промпт"); return; }
-  if (e.target.closest(".act-edit")) { state.editing = loc; renderApp(); return; }
-  if (e.target.closest(".act-cancel")) { state.editing = null; renderApp(); return; }
-  if (e.target.closest(".del")) {
-    await api(`/api/app-keywords/${e.target.closest("tr").dataset.id}`, { method: "DELETE" });
-    await loadApps();
-    return;
-  }
-  const row = e.target.closest("tr.row");
-  if (row) {
-    const next = row.nextElementSibling;
-    if (next?.classList.contains("apps")) { next.remove(); return; }
-    const kw = state.appData.markets.find((m) => m.locale === loc).items.find((k) => String(k.id) === row.dataset.id);
-    const tr = document.createElement("tr");
-    tr.className = "apps";
-    tr.innerHTML = `<td colspan="6">${kw.top_apps.length ? `<div class="muted" style="margin-bottom:6px">Топ выдачи на ${fmtDate(kw.checked_at)}:</div>${appsList(kw.top_apps)}` : '<span class="muted">Ещё не проверялось</span>'}</td>`;
-    row.after(tr);
-    return;
-  }
-  if (e.target.closest(".market-head")) toggleAppSection(loc);
+
+// detail modal (market or app geo)
+$("#detail").addEventListener("click", async (e) => {
+  const md = state.modal;
+  if (!md) return;
+  try {
+    if (md.kind === "market") {
+      if (e.target.closest(".act-prompt")) { await copyText(await marketPrompt(md.loc), "Промпт"); return; }
+      if (e.target.closest(".act-scan")) {
+        await api("/api/scans", { method: "POST", body: { locales: [md.loc] } });
+        toast("Скан рынка запущен — остановить можно кнопкой «Остановить скан»");
+        pollSoon();
+        return;
+      }
+      if (e.target.closest(".act-more")) { md.limit += PAGE; loadMarketModal(); return; }
+      if (e.target.closest(".track")) { await trackFromMarket(e.target.closest(".track")); return; }
+      const row = e.target.closest("tr.row");
+      if (row) toggleTopApps(row, marketOf(md.loc).country, 8);
+      return;
+    }
+    // app geo
+    if (e.target.closest(".act-prompt")) { copyText(appPrompt(md.loc), "Промпт"); return; }
+    if (e.target.closest(".act-addkw")) { addKeywordsDialog("market", [md.loc]); return; }
+    if (e.target.closest(".act-edit")) { md.editing = true; renderAppModal(); return; }
+    if (e.target.closest(".act-cancel")) { md.editing = false; renderAppModal(); return; }
+    if (e.target.closest(".del")) {
+      await api(`/api/app-keywords/${e.target.closest("tr").dataset.id}`, { method: "DELETE" });
+      await loadApps();
+      return;
+    }
+    const row = e.target.closest("tr.row");
+    if (row) {
+      const next = row.nextElementSibling;
+      if (next?.classList.contains("apps")) { next.remove(); return; }
+      const kw = state.appData.markets.find((m) => m.locale === md.loc).items.find((k) => String(k.id) === row.dataset.id);
+      const tr = document.createElement("tr");
+      tr.className = "apps";
+      tr.innerHTML = `<td colspan="6">${kw.top_apps.length ? `<div class="muted" style="margin-bottom:6px">Топ выдачи на ${fmtDate(kw.checked_at)}:</div>${appsList(kw.top_apps)}` : '<span class="muted">Ещё не проверялось</span>'}</td>`;
+      row.after(tr);
+    }
+  } catch (err) { toast(err.message); }
 });
-$("#appSections").addEventListener("submit", async (e) => {
+$("#detail").addEventListener("input", (e) => {
+  const md = state.modal;
+  if (md?.kind !== "market" || !e.target.classList.contains("market-q")) return;
+  md.q = e.target.value;
+  md.limit = PAGE;
+  md.focus = true;
+  clearTimeout(md.timer);
+  md.timer = setTimeout(loadMarketModal, 250);
+});
+$("#detail").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const loc = e.target.closest(".market").dataset.loc;
+  const md = state.modal;
   const fd = new FormData(e.target);
   try {
-    await api(`/api/apps/${state.appId}/meta/${encodeURIComponent(loc)}`, { method: "PUT",
+    await api(`/api/apps/${state.appId}/meta/${encodeURIComponent(md.loc)}`, { method: "PUT",
       body: { title: fd.get("title"), subtitle: fd.get("subtitle"), keywords: fd.get("keywords") } });
-    state.editing = null;
+    md.editing = false;
     await loadApp();
   } catch (err) { toast(err.message); }
 });
 
 (async function init() {
   state.meta = await api("/api/meta");
-  for (const loc of storageGet("open") || []) {
-    if (marketOf(loc)) state.open.set(loc, { q: "", limit: PAGE, data: null });
-  }
-  for (const loc of storageGet("appOpen") || []) state.appOpen.add(loc);
   setView(storageGet("view") === "apps" ? "apps" : "market");
   state.overview = await api("/api/markets");
   renderMarketTiles();
-  renderMarketSections();
   await loadApps();
-  for (const loc of state.open.keys()) loadMarket(loc);
   poll();
 })().catch((e) => toast(e.message));

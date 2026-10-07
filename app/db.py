@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS apps (
     bundle_id   TEXT,
     icon        TEXT,
     seller      TEXT,
+    markets     TEXT,                         -- JSON list of tracked market locales
     created_at  TEXT NOT NULL
 );
 
@@ -122,6 +123,7 @@ CREATE TABLE IF NOT EXISTS asc_accounts (
 
 # Columns added after a table first shipped: (table, column, type).
 ADDED_COLUMNS = [
+    ("apps", "markets", "TEXT"),
     ("app_meta", "store_subtitle", "TEXT"),
     ("app_meta", "iap_names", "TEXT"),
     ("app_meta", "version", "TEXT"),
