@@ -28,6 +28,14 @@ class ItunesError(Exception):
     pass
 
 
+class RateLimited(ItunesError):
+    """Apple's quota is used up; it says how long to wait (Retry-After)."""
+
+    def __init__(self, retry_after: int):
+        super().__init__(f"Apple rate limit, retry in {retry_after}s")
+        self.retry_after = retry_after
+
+
 class _Throttle:
     """Spaces requests out; slows down when Apple answers 429, then recovers."""
 
@@ -54,7 +62,10 @@ class _Throttle:
             self.delay = max(self.base, self.delay * 0.98)
 
 
-_hints_throttle = _Throttle(float(os.environ.get("HINTS_REQUEST_DELAY", "0.35")))
+# Apple allows roughly 1000-1500 hint requests per hour per IP and then blocks
+# for ~40 minutes; an even pace under that never trips the limit.
+HINTS_PER_HOUR = float(os.environ.get("HINTS_PER_HOUR", "1200"))
+_hints_throttle = _Throttle(3600 / HINTS_PER_HOUR)
 _search_throttle = _Throttle(float(os.environ.get("SEARCH_REQUEST_DELAY", "3.2")))
 _page_throttle = _Throttle(1.0)  # lookup API and public app pages
 
@@ -74,6 +85,10 @@ def _get(url: str, throttle: _Throttle, **kwargs) -> httpx.Response:
             err = f"HTTP {resp.status_code}"
             if resp.status_code not in (403, 429, 500, 502, 503, 504):
                 break
+            retry_after = resp.headers.get("retry-after", "")
+            if resp.status_code == 429 and retry_after.isdigit():
+                throttle.throttled()
+                raise RateLimited(int(retry_after))
             if resp.status_code in (403, 429):
                 throttle.throttled()
         # Throttled or transient failure: back off before retrying.

@@ -67,6 +67,11 @@ def start(locales: list[str] | None = None) -> int:
         units = [u for u in units if u["scan_key"] in keys]
     if not units:
         raise ValueError("No markets to scan")
+    # Stalest first, so an interrupted scan does not redo the same markets.
+    with db.tx() as conn:
+        last = {r["scan_key"]: r["t"] for r in conn.execute(
+            "SELECT scan_key, MAX(scanned_at) AS t FROM market_scans GROUP BY scan_key").fetchall()}
+    units.sort(key=lambda u: last.get(u["scan_key"]) or "")
     if not _lock.acquire(blocking=False):
         raise ScanInProgress()
     _cancel.clear()
@@ -127,7 +132,7 @@ def _scan_unit(scan_id: int, unit: dict, done: int) -> int:
             raise Cancelled()
         probed.add(prefix)
         try:
-            terms = itunes.hints(prefix, unit["storefront"])
+            terms = _hints_waiting_out_limits(scan_id, prefix, unit["storefront"])
         except itunes.ItunesError as e:
             failures += 1
             log.warning("%s %r: %s", unit["locale"], prefix, e)
@@ -185,6 +190,23 @@ def _scan_unit(scan_id: int, unit: dict, done: int) -> int:
     log.info("%s: %d prefixes, %d unique terms", unit["locale"], len(lists), len(strength))
     _progress(scan_id, done)
     return done
+
+
+def _hints_waiting_out_limits(scan_id: int, prefix: str, storefront: int) -> list[str]:
+    """Ask for suggestions; when Apple says "429, retry in N s", pause N s and retry."""
+    while True:
+        try:
+            return itunes.hints(prefix, storefront)
+        except itunes.RateLimited as e:
+            wait = min(e.retry_after + 5, 3 * 3600)
+            log.warning("rate limited, pausing %ss", wait)
+            with db.tx() as conn:
+                conn.execute("UPDATE scans SET paused_until = ? WHERE id = ?", (db.after(wait), scan_id))
+            cancelled = _cancel.wait(wait)
+            with db.tx() as conn:
+                conn.execute("UPDATE scans SET paused_until = NULL WHERE id = ?", (scan_id,))
+            if cancelled:
+                raise Cancelled()
 
 
 def _age_hours(conn, where: str) -> float | None:

@@ -629,8 +629,20 @@ async function poll() {
   $("#checkBtn").textContent = checking ? "Остановить проверку" : "Проверить позиции";
   $("#checkBtn").classList.toggle("danger", checking);
   const parts = [];
-  if (scanning) parts.push(`Скан рынков: ${scan.current || ""} ${scan.total ? Math.min(99, Math.round(scan.done / scan.total * 100)) : 0}%`);
-  if (checking) parts.push(`Позиции: ${run.done}/${run.total} (~${Math.ceil((run.total - run.done) * 3.3 / 60)} мин)`);
+  const fmtTime = (s) => new Date(s).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  if (scanning) {
+    const pct = scan.total ? Math.min(99, Math.round(scan.done / scan.total * 100)) : 0;
+    const leftH = Math.max(0, scan.total - scan.done) / state.meta.hints_per_hour;
+    const eta = leftH >= 1 ? `~${leftH.toFixed(1)} ч` : `~${Math.ceil(leftH * 60)} мин`;
+    parts.push(scan.paused_until
+      ? `Скан: пауза из‑за лимита Apple до ${fmtTime(scan.paused_until)} (${pct}%)`
+      : `Скан: ${scan.current || ""} · ${pct}% · осталось ${eta}`);
+  }
+  if (checking) {
+    parts.push(run.paused_until
+      ? `Позиции: пауза из‑за лимита Apple до ${fmtTime(run.paused_until)}`
+      : `Позиции: ${run.done}/${run.total} (~${Math.ceil((run.total - run.done) * 3.3 / 60)} мин)`);
+  }
   if (!parts.length && scan?.finished_at) {
     parts.push(scan.status === "stopped" ? `Скан остановлен ${fmtDateTime(scan.finished_at)}`
       : scan.status === "failed" ? `Скан прерван: ${scan.error}` : `Рынки обновлены ${fmtDateTime(scan.finished_at)}`);
@@ -681,7 +693,7 @@ $("#scanAllBtn").onclick = async () => {
       toast("Скан останавливается — уже готовые рынки сохранены");
     } else {
       await api("/api/scans", { method: "POST", body: {} });
-      toast("Скан всех рынков запущен — это займёт несколько часов");
+      toast(`Скан всех рынков запущен: ~${Math.round(21000 / state.meta.hints_per_hour)} ч в ровном темпе, чтобы не упереться в лимит Apple`);
     }
     pollSoon();
   } catch (e) { toast(e.message); }

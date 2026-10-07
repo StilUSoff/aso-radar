@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS scans (
     total        INTEGER NOT NULL DEFAULT 0,  -- prefixes planned (estimate)
     done         INTEGER NOT NULL DEFAULT 0,  -- prefixes probed
     current      TEXT,                        -- market being scanned
+    paused_until TEXT,                        -- waiting out Apple's rate limit
     error        TEXT
 );
 
@@ -124,6 +125,8 @@ CREATE TABLE IF NOT EXISTS asc_accounts (
 # Columns added after a table first shipped: (table, column, type).
 ADDED_COLUMNS = [
     ("apps", "markets", "TEXT"),
+    ("scans", "paused_until", "TEXT"),
+    ("app_runs", "paused_until", "TEXT"),
     ("app_meta", "store_subtitle", "TEXT"),
     ("app_meta", "iap_names", "TEXT"),
     ("app_meta", "version", "TEXT"),
@@ -175,3 +178,8 @@ def init() -> None:
                 f"UPDATE {table} SET status='failed', error='interrupted', finished_at=? WHERE status='running'",
                 (now(),),
             )
+
+
+def after(seconds: float) -> str:
+    return datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() + seconds, timezone.utc) \
+        .strftime("%Y-%m-%dT%H:%M:%SZ")

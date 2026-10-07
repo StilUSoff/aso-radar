@@ -95,6 +95,7 @@ def meta():
     return {
         "markets": [public(m) for m in MARKETS.values()],
         "scan_interval_hours": scanner.SCAN_INTERVAL_HOURS,
+        "hints_per_hour": itunes.HINTS_PER_HOUR,
         "top_n": scanner.TOP_N,
     }
 
@@ -215,6 +216,8 @@ def top_apps(term: str, country: str):
         return hit[1]
     try:
         apps = itunes.search(term, country)
+    except itunes.RateLimited as e:
+        raise HTTPException(429, f"Apple временно ограничил запросы, попробуйте через {e.retry_after // 60 + 1} мин")
     except itunes.ItunesError as e:
         raise HTTPException(502, str(e))
     _apps_cache[key] = (time.time(), apps)

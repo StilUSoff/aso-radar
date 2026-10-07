@@ -71,7 +71,12 @@ def _run(run_id: int, keywords: list[dict]) -> None:
                     conn.execute("UPDATE app_runs SET status='stopped', finished_at=? WHERE id=?", (db.now(), run_id))
                 return
             try:
-                results = itunes.search(term, country, limit=SEARCH_DEPTH)
+                results = _search_waiting_out_limits(run_id, term, country)
+                if results is None:  # stopped while paused
+                    with db.tx() as conn:
+                        conn.execute("UPDATE app_runs SET status='stopped', finished_at=? WHERE id=?",
+                                     (db.now(), run_id))
+                    return
             except itunes.ItunesError as e:
                 log.warning("search failed for %r/%s: %s", term, country, e)
                 results = None
@@ -107,6 +112,23 @@ def _run(run_id: int, keywords: list[dict]) -> None:
                          (str(e), db.now(), run_id))
     finally:
         _lock.release()
+
+
+def _search_waiting_out_limits(run_id: int, term: str, country: str) -> list[dict] | None:
+    """Search; on "429, retry in N s" pause N s and retry. None if stopped meanwhile."""
+    while True:
+        try:
+            return itunes.search(term, country, limit=SEARCH_DEPTH)
+        except itunes.RateLimited as e:
+            wait = min(e.retry_after + 5, 3 * 3600)
+            log.warning("rate limited, pausing %ss", wait)
+            with db.tx() as conn:
+                conn.execute("UPDATE app_runs SET paused_until = ? WHERE id = ?", (db.after(wait), run_id))
+            cancelled = _cancel.wait(wait)
+            with db.tx() as conn:
+                conn.execute("UPDATE app_runs SET paused_until = NULL WHERE id = ?", (run_id,))
+            if cancelled:
+                return None
 
 
 def scheduler_loop() -> None:
