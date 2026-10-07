@@ -123,6 +123,13 @@ CREATE TABLE IF NOT EXISTS asc_accounts (
 """
 
 # Columns added after a table first shipped: (table, column, type).
+SETTINGS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+
 ADDED_COLUMNS = [
     ("apps", "markets", "TEXT"),
     ("scans", "paused_until", "TEXT"),
@@ -168,6 +175,7 @@ def init() -> None:
                 conn.execute(f"DROP TABLE IF EXISTS {t}")
             conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(SCHEMA)
+        conn.executescript(SETTINGS_SCHEMA)
         for table, column, kind in ADDED_COLUMNS:
             if not conn.execute(f"SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?", (column,)).fetchone():
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
@@ -183,3 +191,15 @@ def init() -> None:
 def after(seconds: float) -> str:
     return datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() + seconds, timezone.utc) \
         .strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def get_setting(key: str, default: str | None = None) -> str | None:
+    with tx() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    with tx() as conn:
+        conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)"
+                     " ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))

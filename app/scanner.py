@@ -232,7 +232,8 @@ def scheduler_loop() -> None:
             elif latest and latest["status"] == "failed" and \
                     time.time() - calendar.timegm(time.strptime(latest["finished_at"], "%Y-%m-%dT%H:%M:%SZ")) < 3600:
                 pass  # back off after a failure
-            elif schedule.is_due(counted["started_at"] if counted else None, SCAN_INTERVAL_HOURS):
+            elif schedule.auto_enabled() and schedule.is_due(
+                    counted["started_at"] if counted else None, SCAN_INTERVAL_HOURS, since=schedule.auto_since()):
                 log.info("scheduled scan started: %s", start())
         except ScanInProgress:
             pass

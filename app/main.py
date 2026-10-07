@@ -284,6 +284,17 @@ def start_scan(body: ScanIn):
         raise HTTPException(400, str(e))
 
 
+class AutoUpdateIn(BaseModel):
+    enabled: bool
+
+
+@app.put("/api/settings/auto-update")
+def set_auto_update(body: AutoUpdateIn):
+    """Turn scheduled market scans and app position checks on or off."""
+    schedule.set_auto(body.enabled)
+    return schedule.describe(scanner.SCAN_INTERVAL_HOURS)
+
+
 @app.post("/api/scans/stop")
 def stop_scan():
     return {"stopping": scanner.stop()}

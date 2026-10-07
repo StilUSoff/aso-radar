@@ -730,6 +730,36 @@ function pollSoon() {
 }
 
 // =====================================================================
+// Auto-update switch
+// =====================================================================
+
+function renderAutoUpdate() {
+  const s = state.meta.schedule;
+  const box = $("#autoUpdate");
+  box.classList.toggle("hidden", !s.configured);
+  if (!s.configured) return;
+  $("#autoUpdateToggle").checked = s.enabled;
+  $(".switch-text", box).textContent = `Автообновление · ${s.label}`;
+  box.dataset.tip = s.enabled
+    ? `Каждую неделю по расписанию (${s.label}) автоматически сканируются все рынки и проверяются позиции приложений.` +
+      (s.next ? ` Следующий запуск: ${s.next}.` : "") + " Выключите, чтобы запускать только вручную."
+    : "Автообновление выключено: рынки и позиции обновляются только по кнопкам. Включите, чтобы запускать по расписанию — первый запуск в ближайший день по расписанию.";
+}
+
+$("#autoUpdateToggle").onchange = async (e) => {
+  const enabled = e.target.checked;
+  try {
+    state.meta.schedule = await api("/api/settings/auto-update", { method: "PUT", body: { enabled } });
+    renderAutoUpdate();
+    toast(enabled ? `Автообновление включено${state.meta.schedule.next ? `, следующий запуск ${state.meta.schedule.next}` : ""}`
+      : "Автообновление выключено — запуск только вручную");
+  } catch (err) {
+    e.target.checked = !enabled;
+    toast(err.message);
+  }
+};
+
+// =====================================================================
 // Events
 // =====================================================================
 
@@ -863,7 +893,7 @@ $("#detail").addEventListener("submit", async (e) => {
 
 (async function init() {
   state.meta = await api("/api/meta");
-  $("#scheduleInfo").textContent = `Автообновление ${state.meta.schedule}`;
+  renderAutoUpdate();
   setView(storageGet("view") === "apps" ? "apps" : "market");
   state.overview = await api("/api/markets");
   renderMarketTiles();

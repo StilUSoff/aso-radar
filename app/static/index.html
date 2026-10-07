@@ -15,6 +15,11 @@
   </nav>
   <div class="spacer"></div>
   <span id="status" class="muted"></span>
+  <label id="autoUpdate" class="switch hidden" data-tip="">
+    <input type="checkbox" id="autoUpdateToggle">
+    <span class="track-ui"></span>
+    <span class="switch-text"></span>
+  </label>
 </header>
 
 <main>
@@ -23,7 +28,6 @@
     <div class="toolbar">
       <input id="globalSearch" type="search" placeholder="Найти запрос во всех гео…" aria-label="Поиск запроса по всем рынкам">
       <span class="spacer"></span>
-      <span id="scheduleInfo" class="muted"></span>
       <button id="scanAllBtn" class="primary">Сканировать все рынки</button>
     </div>
 

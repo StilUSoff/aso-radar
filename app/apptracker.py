@@ -144,8 +144,9 @@ def scheduler_loop() -> None:
                     " ORDER BY id DESC LIMIT 1").fetchone()
                 has_keywords = conn.execute("SELECT 1 FROM app_keywords LIMIT 1").fetchone()
             interrupted = latest and latest["status"] == "failed" and latest["error"] == "interrupted"
-            if has_keywords and (interrupted or schedule.is_due(counted["started_at"] if counted else None,
-                                                                CHECK_INTERVAL_HOURS)):
+            due = schedule.auto_enabled() and schedule.is_due(
+                counted["started_at"] if counted else None, CHECK_INTERVAL_HOURS, since=schedule.auto_since())
+            if has_keywords and (interrupted or due):
                 log.info("scheduled app check started: %s", start())
         except RunInProgress:
             pass
