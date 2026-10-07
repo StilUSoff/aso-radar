@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import logging
 import os
@@ -12,7 +13,7 @@ import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -56,9 +57,32 @@ def healthz():
     return {"ok": True}
 
 
+def _versioned_index() -> str:
+    """index.html with ?v=<content hash> on its assets, so a deploy is never
+    hidden behind a browser's cached copy of app.js / style.css."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    for name in ("app.js", "style.css"):
+        digest = hashlib.sha1((STATIC / name).read_bytes()).hexdigest()[:10]
+        html = html.replace(f"/static/{name}", f"/static/{name}?v={digest}")
+    return html
+
+
+INDEX_HTML = _versioned_index()
+
+
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html")
+    return HTMLResponse(INDEX_HTML, headers={"Cache-Control": "no-cache"})
+
+
+@app.middleware("http")
+async def revalidate_static(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        # Versioned URLs can be cached for good; anything else must be rechecked.
+        response.headers["Cache-Control"] = ("public, max-age=31536000, immutable"
+                                             if request.query_params.get("v") else "no-cache")
+    return response
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
