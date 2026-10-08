@@ -63,19 +63,8 @@ DB_PATH=data/aso.db SCAN_INTERVAL_HOURS=0 .venv/bin/uvicorn app.main:app --reloa
 
 ## Развёртывание на сервере (Ubuntu)
 
-Репозиторий приватный, поэтому серверу нужен deploy key:
-
 ```bash
-# на сервере
-ssh-keygen -t ed25519 -f ~/.ssh/aso_radar_deploy -N ""
-cat ~/.ssh/aso_radar_deploy.pub    # добавить в GitHub: Settings → Deploy keys (read-only)
-cat >> ~/.ssh/config <<'EOF'
-Host github-aso-radar
-  HostName github.com
-  User git
-  IdentityFile ~/.ssh/aso_radar_deploy
-EOF
-git clone git@github-aso-radar:<user>/aso-radar.git ~/aso-radar
+git clone https://github.com/StilUSoff/aso-radar.git ~/aso-radar
 cd ~/aso-radar
 sudo ./deploy/install.sh      # Docker, .env со случайным паролем, права на data/
 ./deploy/update.sh            # сборка и запуск
@@ -105,3 +94,7 @@ sudo ./deploy/install.sh      # Docker, .env со случайным парол�
 | `DOMAIN` | — | Домен для HTTPS через Caddy |
 | `HTTPS_PORT` | `443` | Внешний HTTPS‑порт Caddy |
 | `APP_PORT` | `8000` | Локальный порт сервиса |
+
+## Лицензия
+
+MIT — см. [LICENSE](LICENSE).
